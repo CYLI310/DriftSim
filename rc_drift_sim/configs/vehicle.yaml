@@ -1,0 +1,69 @@
+# 1/10-scale RC drift car. Placeholder values, to be replaced by measured/fitted ones (sysid).
+vehicle:
+  mass: 1.6                 # kg
+  wheelbase: 0.257          # m
+  track_width: 0.19         # m
+  cg_height: 0.035          # m
+  cg_to_front: 0.133        # m (CG to front axle) -> 48 % front static load
+  yaw_inertia: null         # kg m^2, null = estimate mass*(body_length^2 + track^2)/12
+  body_length: 0.36         # m
+  body_width: 0.19          # m
+  wheel_radius: 0.032       # m
+  wheel_inertia: 1.5e-5     # kg m^2
+  roll_stiffness_front: 0.5
+  load_transfer_tau: 0.05   # s
+  drag_coeff_area: 0.02     # Cd*A m^2
+  air_density: 1.2
+  ackermann: 0.0            # drift cars typically run near-parallel steering
+
+drivetrain:
+  layout: rwd               # rwd | awd_spool | awd_overdrive
+  gear_ratio: 8.0           # final drive ratio
+  overdrive_front: 1.0      # only used by awd_overdrive (e.g. 1.2 = fronts 20 % faster)
+  motor_kv: 3000.0          # rpm/V (about a 13.5T sensored brushless)
+  motor_resistance: 0.03    # ohm
+  motor_tau_e: 0.002        # s
+  motor_inertia: 5.0e-6     # kg m^2
+  motor_friction_visc: 1.0e-6
+  motor_friction_coulomb: 0.002
+  current_limit: 40.0       # A
+  battery_voltage: 7.4      # V (2S LiPo)
+  battery_resistance: 0.02  # ohm
+  drag_brake: 0.0
+  reverse_enabled: true
+  throttle_min: 0.02
+  rear_diff_lock: 1.0       # spool (locked) rear, the RC drift standard
+  rear_diff_max_torque: 1.0e9
+  rear_diff_visc: 0.02      # N m s/rad at the wheels
+  front_diff_lock: 1.0
+  front_diff_max_torque: 1.0e9
+  front_diff_visc: 0.02
+  center_lock: 1.0
+  center_max_torque: 1.0e9
+  center_visc: 5.0e-4      # N m s/rad at the motor shaft (x gear_ratio^2 at the wheels!)
+
+actuators:
+  steer_max_deg: 35.0
+  servo_rate_deg_s: 600.0   # 0.10 s per 60 deg
+  servo_tau: 0.02           # s
+  steer_deadband: 0.02
+  steer_offset_deg: 0.0
+  steer_expo: 0.0
+  throttle_deadband: 0.02
+  throttle_expo: 0.0
+  latency: 0.02             # s
+  gyro_enabled: false
+  gyro_gain: 0.0            # rad steering per rad/s yaw rate (typical 0.1-0.3 when enabled)
+  gyro_max_correction_deg: 20.0
+
+sim:
+  dt: 0.001                 # physics at 1000 Hz
+  control_dt: 0.02          # control at 50 Hz
+  integrator: rk4           # rk4 | semi_implicit_euler
+  v_eps: 0.3
+  v_low_start: 0.1
+  v_low: 0.3
+  v_c_low: 0.15
+  v_rr: 0.05
+  ambient_temp: 25.0
+  gravity: 9.81

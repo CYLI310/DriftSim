@@ -1,0 +1,34 @@
+RC drift sim - Milestone 1 summary
+car: 1.6 kg, wheelbase 0.257 m, track 0.19 m, CG height 0.035 m, Iz 0.0221 kg m^2 (estimated)
+tire hard_plastic_drift on epoxy_ptile; drivetrain rwd, spool rear; physics 1000 Hz rk4, control 50 Hz, latency 20 ms
+
+[open-loop drift] schedule [(1.4, 0.0, 0.37), (0.28, 0.25, 1.0), (9.0, -1.0, 0.226)]
+  sustained drift 2.00 s; in the window: beta -49.3 deg (range -59.1..-20.9), yaw rate +91 deg/s, speed 1.75 m/s
+
+[drift equilibrium] v=1.50 m/s beta=-30.0 deg r=+115 deg/s R=0.75 m ay=3.01 m/s^2 (0.31 g) steer=-0.464 thr=0.234 residual=2.3e-13
+  rear slip ratio +0.72, slip angles front -7.7 / rear -42.0 deg; unstable eigenvalue +4.04 1/s (divergence time constant 0.25 s)
+[LQR drift] controller on at t = 1.22 s; worst |beta| afterwards 30.4 deg; last 3 s beta -30.37 +- 0.00 deg, speed 1.49 m/s, yaw rate +115 deg/s
+
+[drift equilibria] speed, sideslip -> steer, throttle, yaw rate, unstable eigenvalue
+  v=1.0: 13/13 trims; e.g. v=1.00 m/s beta=-30.0 deg r=+156 deg/s R=0.37 m ay=2.73 m/s^2 (0.28 g) steer=-0.173 thr=0.194 residual=1.4e-12
+  v=1.5: 12/13 trims; e.g. v=1.50 m/s beta=-32.5 deg r=+114 deg/s R=0.75 m ay=2.99 m/s^2 (0.31 g) steer=-0.536 thr=0.239 residual=1.2e-12
+  v=2.0: 12/13 trims; e.g. v=2.00 m/s beta=-30.0 deg r=+89 deg/s R=1.28 m ay=3.12 m/s^2 (0.32 g) steer=-0.592 thr=0.283 residual=3.2e-12
+
+[understeer gradient] open rear diff, trims at 1.5 m/s; measured vs linear bicycle theory
+  CG 0.090 m behind front axle: measured +4.359, theory +4.665 mrad/(m/s^2)
+  CG 0.133 m behind front axle: measured -0.646, theory -0.545 mrad/(m/s^2)
+  CG 0.170 m behind front axle: measured -4.942, theory -5.029 mrad/(m/s^2)
+
+[coast] 3 m/s -> 1.68 m/s after 3 s (motor friction through the gearing dominates)
+
+[stiffness] stiffness at dt = 1 ms (rk4, limit 2.785):
+    low-speed tire       1060.5 1/s   lambda*dt =  1.061
+    electrical            500.0 1/s   lambda*dt =  0.500
+    tire-wheel mode       417.9 1/s   lambda*dt =  0.418
+    rear diff             228.6 1/s   lambda*dt =  0.229
+    servo                  50.0 1/s   lambda*dt =  0.050
+    load transfer          20.0 1/s   lambda*dt =  0.020
+
+[speed, NumPy reference on this CPU] single env: 137 env-steps/s (2,737 RK4 substeps/s); 1024 envs batched: 20,056 env-steps/s (401,117 substeps/s)
+
+generated in 29 s

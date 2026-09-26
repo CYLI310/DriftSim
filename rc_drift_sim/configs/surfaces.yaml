@@ -1,0 +1,170 @@
+# Surface types. mu_scale is relative to the tire's dry-asphalt mu.
+# Paved surfaces keep the tire's own curve shape (shape_blend 0 -> sharp peak).
+# Loose surfaces blend the shape factor C toward <= 1 (no sharp peak, grip keeps building),
+# shift the peak to larger slip, soften stiffness and add plowing drag. See docs/DESIGN.md.
+surfaces:
+  dry_asphalt:
+    mu_scale: 1.0
+    stiffness_scale: 1.0
+    peak_slip_shift: 0.0
+    shape_c_target: 1.0
+    shape_blend: 0.0
+    curvature_e_shift: 0.0
+    rolling_resistance: 0.015
+    looseness: 0.0
+    loose_drag: 0.0
+    roughness: 0.02
+    mu_patch_std: 0.03
+    optical_texture: 0.9
+    wet: 0
+    color: "#4a4a4a"
+  wet_asphalt:
+    mu_scale: 0.7
+    stiffness_scale: 0.9
+    peak_slip_shift: 0.1
+    shape_c_target: 1.0
+    shape_blend: 0.0
+    curvature_e_shift: 0.0
+    rolling_resistance: 0.015
+    looseness: 0.0
+    loose_drag: 0.0
+    roughness: 0.02
+    mu_patch_std: 0.08
+    optical_texture: 0.5
+    wet: 1
+    color: "#35404d"
+  polished_concrete:
+    mu_scale: 0.75
+    stiffness_scale: 1.0
+    peak_slip_shift: 0.0
+    shape_c_target: 1.0
+    shape_blend: 0.0
+    curvature_e_shift: 0.0
+    rolling_resistance: 0.012
+    looseness: 0.0
+    loose_drag: 0.0
+    roughness: 0.005
+    mu_patch_std: 0.04
+    optical_texture: 0.4
+    wet: 0
+    color: "#9a9a96"
+  epoxy_ptile:              # RC drift track surface
+    mu_scale: 0.85
+    stiffness_scale: 1.05
+    peak_slip_shift: 0.0
+    shape_c_target: 1.0
+    shape_blend: 0.0
+    curvature_e_shift: 0.0
+    rolling_resistance: 0.010
+    looseness: 0.0
+    loose_drag: 0.0
+    roughness: 0.005
+    mu_patch_std: 0.02
+    optical_texture: 0.3
+    wet: 0
+    color: "#3b6ea5"
+  carpet:
+    mu_scale: 1.15
+    stiffness_scale: 1.1
+    peak_slip_shift: 0.0
+    shape_c_target: 1.0
+    shape_blend: 0.0
+    curvature_e_shift: 0.0
+    rolling_resistance: 0.030
+    looseness: 0.0
+    loose_drag: 0.0
+    roughness: 0.01
+    mu_patch_std: 0.03
+    optical_texture: 0.9
+    wet: 0
+    color: "#6b3b3b"
+  packed_dirt:
+    mu_scale: 0.8
+    stiffness_scale: 0.7
+    peak_slip_shift: 0.2
+    shape_c_target: 1.0
+    shape_blend: 0.5
+    curvature_e_shift: 0.0
+    rolling_resistance: 0.030
+    looseness: 0.3
+    loose_drag: 0.10
+    roughness: 0.05
+    mu_patch_std: 0.06
+    optical_texture: 0.9
+    wet: 0
+    color: "#8a6a45"
+  loose_dirt:
+    mu_scale: 0.6
+    stiffness_scale: 0.5
+    peak_slip_shift: 0.5
+    shape_c_target: 0.9
+    shape_blend: 1.0
+    curvature_e_shift: 0.0
+    rolling_resistance: 0.050
+    looseness: 0.7
+    loose_drag: 0.30
+    roughness: 0.10
+    mu_patch_std: 0.10
+    optical_texture: 0.8
+    wet: 0
+    color: "#a67c52"
+  gravel:
+    mu_scale: 0.55
+    stiffness_scale: 0.45
+    peak_slip_shift: 0.6
+    shape_c_target: 0.9
+    shape_blend: 1.0
+    curvature_e_shift: 0.0
+    rolling_resistance: 0.060
+    looseness: 0.8
+    loose_drag: 0.35
+    roughness: 0.20
+    mu_patch_std: 0.15
+    optical_texture: 0.9
+    wet: 0
+    color: "#7d7a72"
+  short_grass:
+    mu_scale: 0.5
+    stiffness_scale: 0.4
+    peak_slip_shift: 0.4
+    shape_c_target: 0.95
+    shape_blend: 0.8
+    curvature_e_shift: 0.0
+    rolling_resistance: 0.080
+    looseness: 0.5
+    loose_drag: 0.20
+    roughness: 0.08
+    mu_patch_std: 0.08
+    optical_texture: 0.8
+    wet: 0
+    color: "#4f8a3a"
+  sand:
+    mu_scale: 0.45
+    stiffness_scale: 0.3
+    peak_slip_shift: 0.8
+    shape_c_target: 0.8
+    shape_blend: 1.0
+    curvature_e_shift: 0.0
+    rolling_resistance: 0.150
+    looseness: 1.0
+    loose_drag: 0.60
+    roughness: 0.05
+    mu_patch_std: 0.10
+    optical_texture: 0.6
+    wet: 0
+    color: "#d9c48a"
+  ice:                      # low-grip ice/snow-like surface
+    mu_scale: 0.15
+    stiffness_scale: 0.6
+    peak_slip_shift: 0.0
+    shape_c_target: 1.0
+    shape_blend: 0.0
+    curvature_e_shift: 0.0
+    rolling_resistance: 0.005
+    looseness: 0.0
+    loose_drag: 0.0
+    roughness: 0.01
+    mu_patch_std: 0.05
+    optical_texture: 0.2
+    wet: 1
+    color: "#d8ecf5"

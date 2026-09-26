@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rc_drift_sim"
+version = "0.1.0"
+description = "Vectorized 2D vehicle dynamics simulator for a 1/10-scale RC drift car"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy",
+  "scipy",
+  "pyyaml",
+  "matplotlib",
+  "gymnasium",
+  "jax",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pyflakes", "pygame", "imageio"]
+
+[tool.setuptools.packages.find]
+include = ["rc_drift_sim*"]
+
+[tool.setuptools.package-data]
+rc_drift_sim = ["configs/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["rc_drift_sim/tests"]
+addopts = "-ra"
+markers = [
+  "benchmark: performance benchmarks (informational)",
+  "slow: slow tests",
+]
