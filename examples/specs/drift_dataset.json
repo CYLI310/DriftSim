@@ -1,0 +1,28 @@
+{
+  "name": "drift_dataset",
+  "seed": 0,
+  "episodes": 2000,
+  "duration_s": 5.0,
+  "params": {
+    "tire": {"dist": "fixed", "value": "hard_plastic_drift"},
+    "surface": {"dist": "fixed", "value": "epoxy_ptile"},
+    "vehicle.mass": {"dist": "uniform", "low": 1.45, "high": 1.75},
+    "surface.mu_scale": {"dist": "normal", "mean": 1.0, "std": 0.05, "low": 0.85, "high": 1.15, "mode": "scale"},
+    "condition.wear": {"dist": "uniform", "low": 0.0, "high": 0.5, "per_wheel": true},
+    "actuators.latency": {"dist": "choice", "values": [0.02, 0.04]}
+  },
+  "maneuver": {
+    "type": "drift_schedule",
+    "params": {
+      "sustain_throttle": {"dist": "uniform", "low": 0.20, "high": 0.26},
+      "sustain_steer": {"dist": "uniform", "low": -1.0, "high": -0.6},
+      "mirror_prob": {"dist": "fixed", "value": 0.5}
+    }
+  },
+  "export": {
+    "formats": ["npz"],
+    "signals": ["pose", "velocity", "derived", "wheel_speeds", "steering", "actions", "accel", "tire_forces"],
+    "decimation": 1, "float32": true, "compress": false, "shard_episodes": 256, "out_dir": "exports"
+  },
+  "run": {"workers": 0}
+}

@@ -1,0 +1,41 @@
+{
+  "name": "domain_randomization",
+  "seed": 1,
+  "episodes": 5000,
+  "duration_s": 4.0,
+  "params": {
+    "tire": {"dist": "choice", "values": ["hard_plastic_drift", "rubber_onroad", "foam", "offroad_pin"]},
+    "surface": {"dist": "choice", "values": ["dry_asphalt", "wet_asphalt", "polished_concrete", "epoxy_ptile",
+                                              "carpet", "packed_dirt", "loose_dirt", "gravel", "short_grass",
+                                              "sand", "ice"]},
+    "vehicle.mass": {"dist": "uniform", "low": 1.35, "high": 1.9},
+    "vehicle.cg_height": {"dist": "uniform", "low": 0.028, "high": 0.042},
+    "vehicle.cg_to_front": {"dist": "uniform", "low": 0.115, "high": 0.15},
+    "drivetrain.battery_voltage": {"dist": "uniform", "low": 7.0, "high": 8.4},
+    "drivetrain.gear_ratio": {"dist": "uniform", "low": 7.0, "high": 9.5},
+    "actuators.servo_rate_deg_s": {"dist": "uniform", "low": 350.0, "high": 700.0},
+    "actuators.latency": {"dist": "choice", "values": [0.0, 0.02, 0.04, 0.06]},
+    "actuators.steer_offset_deg": {"dist": "normal", "mean": 0.0, "std": 1.0},
+    "surface.mu_scale": {"dist": "normal", "mean": 1.0, "std": 0.08, "low": 0.75, "high": 1.25, "mode": "scale"},
+    "condition.wear": {"dist": "uniform", "low": 0.0, "high": 0.8, "per_wheel": true},
+    "condition.wetness": {"dist": "choice", "values": [0.0, 0.0, 0.0, 0.5, 1.0]},
+    "condition.contamination": {"dist": "uniform", "low": 0.0, "high": 0.4, "per_wheel": true},
+    "condition.temp0": {"dist": "uniform", "low": 10.0, "high": 55.0, "per_wheel": true},
+    "init.speed": {"dist": "uniform", "low": 0.0, "high": 2.5}
+  },
+  "maneuver": {
+    "type": "random",
+    "params": {
+      "steer_std": {"dist": "uniform", "low": 0.2, "high": 0.7},
+      "throttle_mean": {"dist": "uniform", "low": 0.15, "high": 0.4},
+      "bandwidth_hz": {"dist": "loguniform", "low": 0.3, "high": 3.0},
+      "mirror_prob": {"dist": "fixed", "value": 0.5}
+    }
+  },
+  "export": {
+    "formats": ["npz"],
+    "signals": ["pose", "velocity", "derived", "wheel_speeds", "steering", "actions", "accel"],
+    "decimation": 1, "float32": true, "compress": true, "shard_episodes": 512, "out_dir": "exports"
+  },
+  "run": {"workers": 0}
+}

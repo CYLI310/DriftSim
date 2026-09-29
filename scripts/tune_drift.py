@@ -1,4 +1,4 @@
-"""Re-tune the open-loop drift schedule used by rc_drift_sim/tests/test_drift.py (batched search).
+"""Re-tune the open-loop drift schedule used by tests/test_drift.py (batched search).
 
 Why this tool exists: a RWD drift is open-loop unstable (see sim/equilibrium.py), so the open-loop
 schedule is sensitive to the physics. After changing the model, run

@@ -77,7 +77,10 @@ def wheel_inertias(dp: DrivetrainParams, vp: VehicleParams) -> np.ndarray:
 # ----------------------------------------------------------------------------- precomputed model
 @dataclass(frozen=True, slots=True)
 class DrivetrainModel:
-    """Drivetrain constants (see module docstring). Arrays are (4,) or (2,) (front, rear axle)."""
+    """Drivetrain constants (see module docstring). Arrays are (4,) per wheel or (2,) per axle
+    (front, rear); floats are per car. For a batch of cars with different parameters every numeric
+    field gains a leading batch axis: (B, 4), (B, 2) and (B,) (see ``vehicle.compile_model_batch``).
+    ``layout`` (through ``front_driven`` and ``driven``) and ``reverse_enabled`` must be shared."""
     G: np.ndarray            # (4,) gear ratio per wheel
     driven: np.ndarray       # (4,) 1.0 = connected to the motor
     G_driven: np.ndarray     # (4,) G * driven / n_driven  (shaft-speed weights)
@@ -149,7 +152,7 @@ def esc_command_m(dm: DrivetrainModel, i, omega_m, thr) -> tuple[np.ndarray, np.
         brake = thr < 0.0
         v_cmd = np.where(brake, 0.0, v_cmd)
         g = np.where(brake, abs_thr, g)
-    if dm.drag_brake != 0.0:
+    if np.any(dm.drag_brake != 0.0):                   # parameter check, not a traced value
         g = g + (1.0 - g) * dm.drag_brake
     emf = dm.ke * omega_m
     v_cmd = np.clip(v_cmd, emf - dm.v_lim, emf + dm.v_lim)
@@ -203,12 +206,12 @@ def wheel_accelerations_m(dm: DrivetrainModel, omega: np.ndarray, T_motor, tau: 
                                     dm.center_lock, dm.center_max, dm.center_visc)
         T_r_shaft = T_motor - T_f_shaft                # torque conservation at the shaft
         TfL, TfR = axle_torques(dm.Gf * T_f_shaft, tFL, tFR, oFL, oFR,
-                                dm.lock[0], dm.max_torque[0], dm.visc[0])
+                                dm.lock[..., 0], dm.max_torque[..., 0], dm.visc[..., 0])
     else:
         T_r_shaft = T_motor
         TfL = TfR = np.zeros_like(oFL)                # undriven front wheels: free rolling
     TrL, TrR = axle_torques(dm.Gr * T_r_shaft, tRL, tRR, oRL, oRR,
-                            dm.lock[1], dm.max_torque[1], dm.visc[1])
+                            dm.lock[..., 1], dm.max_torque[..., 1], dm.visc[..., 1])
     T_wheel = np.stack([TfL, TfR, TrL, TrR], axis=-1)
     return (T_wheel - tau) * dm.inv_inertia
 

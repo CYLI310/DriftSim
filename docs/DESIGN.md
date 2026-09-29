@@ -14,22 +14,21 @@ training come in later milestones; every interface already carries the hooks the
 ## 0. Repository layout
 
 ```
-docs/DESIGN.md          this contract
-scripts/                runnable entry points (not imported by the library)
-  make_m1_outputs.py      regenerate outputs/m1/ (figures, GIFs, summary.txt)
-  tune_drift.py           re-derive the open-loop drift schedule after physics changes
-outputs/                generated artifacts (git-ignored)
 rc_drift_sim/
-  configs/              vehicle.yaml, tires.yaml, surfaces.yaml
+  configs/              vehicle.yaml, tires.yaml, surfaces.yaml (all default values)
   sim/                  params, state, tire, surface, drivetrain, actuators, vehicle, integrator,
                         equilibrium (trims, linearization), stability (stiffness guard)
   control/              maneuvers (open-loop schedules), lqr (TrimLQR, LQRDriftPolicy)
+  datagen/              batch dataset generation (catalog, spec, sampling, inputs, runner, export)
   viz/                  render (top-down, animations), plots (time series, tire curves, g-g)
-  envs/ train/ sysid/   placeholders for Milestones 4-8
-  tests/                pytest suite
+examples/               quickstart.py, batch_export.py, specs/*.json
+scripts/                make_figures.py (docs/images/m1), tune_drift.py, make_param_reference.py
+tests/                  pytest suite (helpers.py holds shared helper functions)
+docs/                   DESIGN.md (this contract), DATA_GENERATION.md, PARAMETERS.md (generated), images/
 ```
-Dependency direction: `sim` depends on nothing else in the package; `control` and `viz` depend on
-`sim`; `tests` and `scripts` depend on everything; nothing depends on `tests` or `scripts`.
+Dependency direction: `sim` depends on nothing else in the package; `control`, `viz` and `datagen`
+depend on `sim`; `tests`, `examples` and `scripts` depend on everything; nothing depends on them.
+The Gymnasium env, training and system identification packages are added with Milestones 4-8.
 
 ## 1. Conventions
 
@@ -239,7 +238,7 @@ Then `domega = drivetrain.wheel_accelerations(dp, vp, omega, T_motor, tau)`.
 Steering: `delta_target = actuators.steering_target(ap, steer_cmd, r)`,
 `d(DELTA)/dt = actuators.steering_rate(ap, DELTA, delta_target)`.
 
-Motor: `omega_m = drivetrain.shaft_speed(dp, omega)`, `di/dt = drivetrain.current_derivative(dp, ap, i, omega_m, throttle_cmd)`, `T_motor = drivetrain.motor_torque(dp, i, omega_m)`.
+Motor: `omega_m = drivetrain.shaft_speed(dp, omega)`, `di/dt = drivetrain.current_derivative(dp, i, omega_m, thr)` with `thr = actuators.throttle_command(ap, throttle_cmd)`, `T_motor = drivetrain.motor_torque(dp, i, omega_m)`.
 
 Yaw inertia: `VehicleParams.yaw_inertia` if given, else `mass*(body_length^2 + track_width^2)/12`.
 
@@ -250,6 +249,14 @@ Yaw inertia: `VehicleParams.yaw_inertia` if given, else `mass*(body_length^2 + t
     .step(s, action, n_sub=None, want_info=True) -> (s_new, info)   one control period; s may be (B, NS)
         (zero-order hold on the action; action is already latency-delayed by the caller)
     .rollout_batch(s0 (B, NS), actions (T, B, 2), record_info=False) -> (states (T+1, B, NS), info)
+
+Per-car parameter batches: `compile_model_batch(params_list, surfs, conds)` stacks B cars with
+different numeric parameters into one `VehicleModel`. Every model field is used either on per-wheel
+quantities or on per-car scalars, so fields become (B, 1) / (B, 4) or (B,) arrays and
+`derivatives_model` runs unchanged on (B, NS) states. `VehicleBatch(params_list, surfs, conds)`
+wraps it (`initial_states`, `step`). Structural settings (`STRUCTURAL`: combined-slip mode,
+layout, reverse enable, dt, control_dt, integrator) must be shared. Each car's result is
+bit-identical to simulating it alone (tests/test_batch.py); `rc_drift_sim.datagen` builds on this.
     Vehicle() runs sim.stability.check_stiffness and warns when dt is too large for the config.
     .rollout(s0, actions (T,2) or callable(t, s, info)->action, control_dt) -> Trajectory
         Trajectory holds arrays: t, states (T+1, NS), actions (T,2), and stacked info dict.
@@ -343,7 +350,7 @@ Pillow, MP4 via ffmpeg when available), `snapshot(traj, params, out_path, ks=Non
 steering angle vs target vs command, throttle and motor current, per-wheel slip ratio, slip
 angle, Fz, tire temperature), `plot_tire_curves(tire, surfaces, out_path, Fz=4, T_tire=25)`,
 `plot_gg(traj, out_path)`.
-`scripts/make_m1_outputs.py` regenerates everything in `outputs/m1/`.
+`scripts/make_figures.py` regenerates everything in `docs/images/m1/`.
 
 ## 9b. Trim and stability analysis (`sim/equilibrium.py`), LQR control (`control/lqr.py`)
 
@@ -351,9 +358,9 @@ angle, Fz, tire temperature), `plot_tire_curves(tire, surfaces, out_path, Fz=4, 
 (all derivatives zero except the pose; 23 dynamic states + 2 inputs vs 23 equations + speed +
 sideslip-or-yaw-rate) with least squares, multi-start, and a near-straight anchor;
 `continuation(vehicle, v, values, key)` follows a family (warm starts with step-size control,
-cold multi-start only as a last resort); `trim_family(...)` anchors at the middle of the range
-and sweeps outward. Each least-squares solve is capped at `MAX_NFEV = 200` evaluations (converged
-trims need <= 40), so a point beyond the end of a branch fails fast. `open_loop_eigenvalues`,
+cold multi-start only as a last resort). Each least-squares solve is capped at `MAX_NFEV = 400`
+evaluations (warm steps converge in <= ~60, cold drift solves in up to ~140), so a point beyond
+the end of a branch fails fast. `open_loop_eigenvalues`,
 `linearize` (continuous) and `discrete_model` (one control period through the real integrator).
 `control/lqr.py`: `lqr_gain` (with input-delay augmentation), `TrimLQR` (callable policy holding a
 trim) and `LQRDriftPolicy` (launch, throttle-stab entry, then `TrimLQR`, latency applied inside).
@@ -371,7 +378,25 @@ low-speed tire, tire-wheel relaxation mode, servo, load transfer) and compares l
 integrator limit (RK4 2.785, Euler 2.0; the saturating low-speed tire mode is allowed 2x).
 `Vehicle()` warns on a too-stiff configuration; a test sweeps every compound x surface x layout.
 
-## 10. Tests (`rc_drift_sim/tests/`)
+## 10. Tests (`tests/`)
+
+Required checks (the "item N" references in the test docstrings):
+
+| # | check | test |
+|---|-------|------|
+| 1 | car at rest stays at rest | test_vehicle::test_rest_stays_at_rest |
+| 2 | straight-line coasting decays correctly | test_vehicle::test_straight_line_coasting_decays_correctly |
+| 3 | low-speed behavior is stable (no NaN near zero velocity) | test_vehicle::test_low_speed_is_stable |
+| 4 | steady-state cornering matches under/oversteer theory | test_vehicle::test_steady_state_understeer_gradient_matches_bicycle_theory |
+| 5 | tire force never exceeds mu*Fz on any surface | test_tire::test_force_never_exceeds_mu_fz |
+| 6 | loose surfaces have no sharp peak, paved ones do | test_tire::test_paved_surfaces_have_a_sharp_peak, test_loose_surfaces_have_no_peak |
+| 7 | RK4 and semi-implicit Euler agree and converge | test_vehicle::test_rk4_and_semi_implicit_euler_agree_and_converge |
+| 8 | mirror symmetry | test_vehicle::test_mirror_symmetry |
+| 9 | locked vs open vs limited-slip differential | test_drivetrain::test_locked_rear_diff_keeps_wheels_together_open_diff_does_not |
+| 10 | open-loop input produces a sustained drift | test_drift::test_open_loop_drift_is_sustained |
+| 11 | benchmark reports steps per second | test_benchmark |
+| 12 | YAML configs round-trip into the dataclasses | test_config |
+
 
 `pytest` (about 1 minute on a laptop CPU; `-s` prints the measured physics numbers):
 - test_config: YAML round trip, dataclass fields, per-wheel surface broadcasting.

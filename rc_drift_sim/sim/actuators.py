@@ -19,7 +19,67 @@ from collections import deque
 
 import numpy as np
 
+from dataclasses import dataclass
+
 from .params import ActuatorParams, VehicleParams
+
+
+# ----------------------------------------------------------------------------- precomputed model
+@dataclass(frozen=True, slots=True)
+class ActuatorModel:
+    """Actuator constants. Floats for one car, or (B,) arrays for a batch of cars with different
+    settings (every field is used against per-car scalars such as the steering command).
+
+    ``gyro_gain_eff = gyro_gain * gyro_enabled`` so cars with and without a gyro can share a batch."""
+    steer_max: object
+    servo_rate: object
+    servo_tau: object
+    steer_deadband: object
+    steer_offset: object
+    steer_expo: object
+    throttle_deadband: object
+    throttle_expo: object
+    gyro_gain_eff: object
+    gyro_max_correction: object
+
+
+def actuator_model(ap: ActuatorParams) -> ActuatorModel:
+    return ActuatorModel(
+        steer_max=float(ap.steer_max), servo_rate=float(ap.servo_rate), servo_tau=float(ap.servo_tau),
+        steer_deadband=float(ap.steer_deadband), steer_offset=float(ap.steer_offset),
+        steer_expo=float(ap.steer_expo), throttle_deadband=float(ap.throttle_deadband),
+        throttle_expo=float(ap.throttle_expo),
+        gyro_gain_eff=float(ap.gyro_gain) * (1.0 if ap.gyro_enabled else 0.0),
+        gyro_max_correction=float(ap.gyro_max_correction))
+
+
+def throttle_command_m(am: ActuatorModel, thr_cmd) -> np.ndarray:
+    """ESC throttle from the raw command (deadband then expo) on a precomputed model."""
+    return apply_expo(deadband(thr_cmd, am.throttle_deadband), am.throttle_expo)
+
+
+def steering_target_m(am: ActuatorModel, steer_cmd, yaw_rate) -> np.ndarray:
+    """Servo target angle (rad) on a precomputed model; see ``steering_target``."""
+    yaw_rate = np.asarray(yaw_rate, dtype=np.float64)
+    c = apply_expo(deadband(steer_cmd, am.steer_deadband), am.steer_expo)
+    delta = c * am.steer_max + am.steer_offset
+    correction = np.clip(am.gyro_gain_eff * yaw_rate, -am.gyro_max_correction, am.gyro_max_correction)
+    return np.clip(delta - correction, -am.steer_max, am.steer_max)
+
+
+def steering_rate_m(am: ActuatorModel, delta, delta_target) -> np.ndarray:
+    """Servo slew ``clip((target - delta)/servo_tau, -servo_rate, servo_rate)`` (rad/s)."""
+    return np.clip((np.asarray(delta_target, dtype=np.float64) - np.asarray(delta, dtype=np.float64))
+                   / am.servo_tau, -am.servo_rate, am.servo_rate)
+
+
+def ackermann_angles_m(L, half_track, ackermann, delta) -> tuple[np.ndarray, np.ndarray]:
+    """``ackermann_angles`` on plain numbers or per-car arrays (wheelbase, half track, blend 0..1)."""
+    delta = np.asarray(delta, dtype=np.float64)
+    s, c = np.sin(delta), np.cos(delta)
+    full_fl = np.arctan2(L * s, L * c - half_track * s)
+    full_fr = np.arctan2(L * s, L * c + half_track * s)
+    return (1.0 - ackermann) * delta + ackermann * full_fl, (1.0 - ackermann) * delta + ackermann * full_fr
 
 
 # ----------------------------------------------------------------------------- command shaping
@@ -45,7 +105,7 @@ def apply_expo(x: float | np.ndarray, expo: float) -> np.ndarray:
 
 def throttle_command(ap: ActuatorParams, thr_cmd: float | np.ndarray) -> np.ndarray:
     """ESC throttle ``thr`` in [-1, 1] from the raw command: deadband then expo (dimensionless)."""
-    return apply_expo(deadband(thr_cmd, float(ap.throttle_deadband)), float(ap.throttle_expo))
+    return throttle_command_m(actuator_model(ap), thr_cmd)
 
 
 # ----------------------------------------------------------------------------- steering
@@ -59,15 +119,7 @@ def steering_target(ap: ActuatorParams, steer_cmd: float | np.ndarray,
     ``yaw_rate`` in rad/s. Odd-symmetric in ``steer_cmd`` when ``steer_offset = 0`` and the gyro
     term is zero.
     """
-    yaw_rate = np.asarray(yaw_rate, dtype=np.float64)
-    steer_max = float(ap.steer_max)
-    c = apply_expo(deadband(steer_cmd, float(ap.steer_deadband)), float(ap.steer_expo))
-    delta = c * steer_max + float(ap.steer_offset)
-    gyro_on = 1.0 if ap.gyro_enabled else 0.0                     # config bool
-    g_max = float(ap.gyro_max_correction)
-    correction = np.clip(float(ap.gyro_gain) * yaw_rate, -g_max, g_max)
-    delta = delta - gyro_on * correction
-    return np.clip(delta, -steer_max, steer_max)
+    return steering_target_m(actuator_model(ap), steer_cmd, yaw_rate)
 
 
 def steering_rate(ap: ActuatorParams, delta: float | np.ndarray,
@@ -76,10 +128,7 @@ def steering_rate(ap: ActuatorParams, delta: float | np.ndarray,
 
     ``clip((delta_target - delta) / servo_tau, -servo_rate, +servo_rate)``.
     """
-    delta = np.asarray(delta, dtype=np.float64)
-    delta_target = np.asarray(delta_target, dtype=np.float64)
-    rate = float(ap.servo_rate)
-    return np.clip((delta_target - delta) / float(ap.servo_tau), -rate, rate)
+    return steering_rate_m(actuator_model(ap), delta, delta_target)
 
 
 def ackermann_angles(vp: VehicleParams, delta: float | np.ndarray
@@ -96,14 +145,7 @@ def ackermann_angles(vp: VehicleParams, delta: float | np.ndarray
     magnitude). This form needs no ``tan(delta) ~ 0`` guard (it is exactly 0 at d = 0), has no
     singularity for any finite ``delta``, and is odd-symmetric: ``delta_FL(-d) = -delta_FR(d)``.
     """
-    delta = np.asarray(delta, dtype=np.float64)
-    L = float(vp.wheelbase)
-    hw = 0.5 * float(vp.track_width)
-    s, c = np.sin(delta), np.cos(delta)
-    full_fl = np.arctan2(L * s, L * c - hw * s)
-    full_fr = np.arctan2(L * s, L * c + hw * s)
-    a = float(vp.ackermann)
-    return (1.0 - a) * delta + a * full_fl, (1.0 - a) * delta + a * full_fr
+    return ackermann_angles_m(float(vp.wheelbase), 0.5 * float(vp.track_width), float(vp.ackermann), delta)
 
 
 # ----------------------------------------------------------------------------- latency buffer

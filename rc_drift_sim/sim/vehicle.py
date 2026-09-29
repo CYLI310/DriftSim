@@ -33,6 +33,9 @@ Public API
         .step(s, action, n_sub=None, want_info=True) -> (s_new, info)   s (NS,) or (B, NS)
         .rollout(s0, actions, control_dt=None, n_steps=None, duration=None, t0=0.0) -> Trajectory
         .rollout_batch(s0 (B,NS), actions (T,B,2), record_info=False) -> (states (T+1,B,NS), info)
+    compile_model_batch(params_list, surfs, conds) -> VehicleModel   B cars, different parameters
+    VehicleBatch(params_list, surfs=None, conds=None)
+        .initial_states(...) -> (B, NS), .step(s, u, want_info=False) -> (s_new, info)
     make_vehicle(tire="hard_plastic_drift", surface="epoxy_ptile", **overrides) -> Vehicle
 """
 from __future__ import annotations
@@ -44,7 +47,7 @@ from typing import Any, Callable, Mapping
 import numpy as np
 
 from . import actuators, drivetrain, integrator, tire
-from .params import ActuatorParams, Params, SurfaceParams, TireCondition, default_params
+from .params import Params, SurfaceParams, TireCondition, default_params
 from .state import (ALPHA_LAG, CONTAM, DELTA, DFZ_LAT, DFZ_LONG, I_MOTOR, KAPPA_LAG, NS, OMEGA,
                     R, T_TIRE, VX, VY, X, Y, YAW)
 from .surface import uniform_surface
@@ -75,7 +78,7 @@ class VehicleModel:
     tm: tire.TireModel
     ls: tire.LowSpeed
     dm: drivetrain.DrivetrainModel
-    ap: ActuatorParams
+    am: actuators.ActuatorModel
     inv_m: float
     m: float
     inv_iz: float
@@ -115,7 +118,7 @@ def compile_model(params: Params, surf: SurfaceParams | None = None,
         tm=tire.tire_model(params.tire, surf, cond),
         ls=tire.low_speed_consts(sim),
         dm=drivetrain.drivetrain_model(params.drivetrain, vp),
-        ap=params.actuators,
+        am=actuators.actuator_model(params.actuators),
         m=float(vp.mass), inv_m=1.0 / float(vp.mass), inv_iz=1.0 / float(vp.iz),
         Rw=float(vp.wheel_radius),
         xi=pos[:, 0].copy(), yi=pos[:, 1].copy(),
@@ -130,6 +133,82 @@ def compile_model(params: Params, surf: SurfaceParams | None = None,
         ackermann=float(vp.ackermann),
         v_eps=float(sim.v_eps), inv_v_rr=1.0 / float(sim.v_rr), t_amb=float(sim.ambient_temp),
     )
+
+
+# ----------------------------------------------------------------------------- per-car parameter batches
+# Every numeric model field acts either on per-wheel quantities (shape (..., 4)) or on per-car
+# scalars (shape (...)). Stacking B cars therefore gives (B, 1) / (B, 4) arrays for the first kind
+# and (B,) arrays for the second, and ``derivatives_model`` runs unchanged on (B, NS) states.
+_WHEEL_FLOATS = {  # float fields used against per-wheel arrays -> stacked to (B, 1)
+    "VehicleModel": {"Rw", "v_eps", "inv_v_rr", "t_amb"},
+    "TireModel": "all", "LowSpeed": "all", "DrivetrainModel": set(), "ActuatorModel": set(),
+}
+_SHARED = {  # structural fields that must be identical across the batch
+    "TireModel": {"mode", "use_temp"}, "DrivetrainModel": {"front_driven", "reverse_enabled", "driven"},
+}
+STRUCTURAL = ("tire.combined_mode", "drivetrain.layout", "drivetrain.reverse_enabled",
+              "sim.dt", "sim.control_dt", "sim.integrator")
+
+
+def _stack_fields(objs: list, kind: str, skip: tuple = ()) -> Any:
+    """Stack a list of identical-type model objects (dataclass or NamedTuple) field by field;
+    ``skip`` fields keep the first object's value (the caller replaces them)."""
+    first = objs[0]
+    names = first._fields if isinstance(first, tuple) else [f.name for f in fields(first)]
+    wheel = _WHEEL_FLOATS.get(kind, set())
+    shared = _SHARED.get(kind, set())
+    out = {}
+    for name in names:
+        vals = [getattr(o, name) for o in objs]
+        v0 = vals[0]
+        if name in skip:
+            out[name] = v0
+        elif name in shared or isinstance(v0, (str, bool)):
+            if name == "has_plow":
+                out[name] = any(vals)
+                continue
+            same = all(np.array_equal(v, v0) if isinstance(v0, np.ndarray) else v == v0 for v in vals)
+            if not same:
+                raise ValueError(f"{kind}.{name} differs across the batch; it must be shared "
+                                 f"(structural settings: {', '.join(STRUCTURAL)})")
+            out[name] = v0
+        elif isinstance(v0, np.ndarray) and v0.ndim >= 1:
+            out[name] = np.stack([np.asarray(v, dtype=np.float64) for v in vals])
+        elif isinstance(v0, np.ndarray) and kind == "TireModel":        # 0-d surface field
+            out[name] = np.stack([np.broadcast_to(np.asarray(v, dtype=np.float64), (4,)) for v in vals])
+        else:
+            arr = np.array([float(v) for v in vals], dtype=np.float64)
+            out[name] = arr[:, None] if (wheel == "all" or name in wheel) else arr
+    return type(first)(**out)
+
+
+def compile_model_batch(params_list: list[Params], surfs: list[SurfaceParams] | None = None,
+                        conds: list[TireCondition | None] | None = None) -> VehicleModel:
+    """One ``VehicleModel`` for B cars with different numeric parameters (mass, tire compound,
+    surface, wear, latency-free actuator settings, gearing, ...), stepped together on (B, NS) states.
+
+    Structural settings (``STRUCTURAL``: combined-slip mode, drivetrain layout, reverse enable,
+    time steps, integrator) must be identical across the batch; group cars by them first.
+    """
+    B = len(params_list)
+    if B == 0:
+        raise ValueError("empty batch")
+    surfs = [None] * B if surfs is None else list(surfs)
+    conds = [None] * B if conds is None else list(conds)
+    ref = params_list[0]
+    for key in STRUCTURAL:
+        g, f = key.split(".")
+        vals = {getattr(getattr(p, g), f) for p in params_list}
+        if len(vals) > 1:
+            raise ValueError(f"{key} must be shared across a batch, got {sorted(map(str, vals))}")
+    models = [compile_model(p, s, c) for p, s, c in zip(params_list, surfs, conds)]
+    vm = _stack_fields(models, "VehicleModel", skip=("params", "tm", "ls", "dm", "am"))
+    return dataclasses.replace(
+        vm, params=ref,
+        tm=_stack_fields([m.tm for m in models], "TireModel"),
+        ls=_stack_fields([m.ls for m in models], "LowSpeed"),
+        dm=_stack_fields([m.dm for m in models], "DrivetrainModel"),
+        am=_stack_fields([m.am for m in models], "ActuatorModel"))
 
 
 # small identity-keyed cache so the functional API ``derivatives(s, u, p, surf, cond)`` does not
@@ -165,7 +244,7 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
     """
     s = np.asarray(s, dtype=np.float64)
     u = np.asarray(u, dtype=np.float64)
-    tm, dm, ap = vm.tm, vm.dm, vm.ap
+    tm, dm, am = vm.tm, vm.dm, vm.am
     steer_cmd, thr_cmd = u[..., 0], u[..., 1]
     psi = s[..., YAW]
     vx, vy, r = s[..., VX], s[..., VY], s[..., R]
@@ -180,12 +259,12 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
 
     # --- per-wheel steer angles (rear wheels do not steer: cos = 1, sin = 0 there, so the trig
     #     is only evaluated for the front axle)
-    if vm.ackermann == 0.0:                               # configuration branch (parallel steer)
+    if np.all(vm.ackermann == 0.0):                       # parameter check (parallel steer)
         delta_w = delta[..., None] * _FRONT
         cd = np.cos(delta)[..., None] * _FRONT + _REAR
         sd = np.sin(delta)[..., None] * _FRONT
     else:
-        d_fl, d_fr = actuators.ackermann_angles(vm.params.vehicle, delta)
+        d_fl, d_fr = actuators.ackermann_angles_m(vm.L, vm.half_track, vm.ackermann, delta)
         d_front = np.stack([d_fl, d_fr], axis=-1)
         pad = np.zeros(d_front.shape, dtype=np.float64)
         delta_w = np.concatenate([d_front, pad], axis=-1)
@@ -234,15 +313,15 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
     # --- wheel torques and drivetrain
     T_rr = tm.crr * Fz * vm.Rw * np.tanh(omega_R * vm.inv_v_rr)
     tau = vm.Rw * Fx + T_rr
-    thr = actuators.throttle_command(ap, thr_cmd)
+    thr = actuators.throttle_command_m(am, thr_cmd)
     omega_m = drivetrain.shaft_speed_m(dm, omega)
     di = drivetrain.current_derivative_m(dm, i_m, omega_m, thr)
     T_motor = drivetrain.motor_torque_m(dm, i_m, omega_m)
     domega = drivetrain.wheel_accelerations_m(dm, omega, T_motor, tau)
 
     # --- steering servo
-    delta_target = actuators.steering_target(ap, steer_cmd, r)
-    ddelta = actuators.steering_rate(ap, delta, delta_target)
+    delta_target = actuators.steering_target_m(am, steer_cmd, r)
+    ddelta = actuators.steering_rate_m(am, delta, delta_target)
 
     # --- load-transfer lag (targets from this evaluation's specific force, incl. aero)
     ddfz_long = (vm.lt_long * ax - dfz_long) * vm.inv_tau_lt
@@ -581,6 +660,78 @@ class Vehicle:
         return out, (stack_info(infos) if record_info else None)
 
 
+class VehicleBatch:
+    """B cars with (possibly) different numeric parameters, stepped together.
+
+    ``VehicleBatch(params_list, surfs=None, conds=None)``: one entry per car; ``surfs`` default to
+    ``uniform_surface(params.surface)`` and ``conds`` to a neutral condition, per car. Structural
+    settings (``STRUCTURAL``) must be shared. Like ``Vehicle``, no control latency is applied here.
+    """
+
+    def __init__(self, params_list: list[Params], surfs: list[SurfaceParams] | None = None,
+                 conds: list[TireCondition | None] | None = None, check_stiffness: bool = True) -> None:
+        self.params_list = list(params_list)
+        B = len(self.params_list)
+        self.surfs = [uniform_surface(p.surface) if s is None else s
+                      for p, s in zip(self.params_list, surfs or [None] * B)]
+        self.conds = [TireCondition.neutral(p.sim.ambient_temp) if c is None else c
+                      for p, c in zip(self.params_list, conds or [None] * B)]
+        self.model = compile_model_batch(self.params_list, self.surfs, self.conds)
+        self.params = self.params_list[0]
+        if check_stiffness:
+            from .stability import stiffness_report
+            bad = [i for i, (p, s) in enumerate(zip(self.params_list, self.surfs))
+                   if not stiffness_report(p, s).ok]
+            if bad:
+                import warnings
+                warnings.warn(f"{len(bad)} of {B} cars are too stiff for {self.params.sim.integrator} at "
+                              f"dt = {self.params.sim.dt} s (first: car {bad[0]}); see sim.stability",
+                              RuntimeWarning, stacklevel=2)
+
+    def __len__(self) -> int:
+        return len(self.params_list)
+
+    @property
+    def dt(self) -> float:
+        return float(self.params.sim.dt)
+
+    @property
+    def control_dt(self) -> float:
+        return float(self.params.sim.control_dt)
+
+    @property
+    def n_substeps(self) -> int:
+        return int(self.params.sim.n_substeps)
+
+    def initial_states(self, x=0.0, y=0.0, yaw=0.0, v=0.0, beta=0.0, yaw_rate=0.0) -> np.ndarray:
+        """(B, NS) initial states; every argument is a scalar or a (B,) array. Wheels roll without
+        slip, tire temperatures and contamination come from each car's condition."""
+        B = len(self)
+        f = lambda a: np.broadcast_to(np.asarray(a, dtype=np.float64), (B,))  # noqa: E731
+        x, y, yaw, v, beta, r = map(f, (x, y, yaw, v, beta, yaw_rate))
+        vx, vy = v * np.cos(beta), v * np.sin(beta)
+        yi = self.model.yi                                            # (B, 4)
+        omega = (vx[:, None] - r[:, None] * yi) / self.model.Rw         # (B, 4)
+        temps = np.stack([np.broadcast_to(np.asarray(c.temp0, dtype=np.float64), (4,)) for c in self.conds])
+        contam = np.stack([np.broadcast_to(np.clip(np.asarray(c.contamination, dtype=np.float64), 0, 1), (4,))
+                           for c in self.conds])
+        z2, z8 = np.zeros((B, 2)), np.zeros((B, 8))
+        return np.concatenate([np.stack([x, y, yaw, vx, vy, r], axis=1), omega, z2, temps, z2, z8, contam],
+                              axis=1)
+
+    def derivatives(self, s: np.ndarray, u: np.ndarray, want_info: bool = True):
+        return derivatives_model(s, u, self.model, want_info=want_info)
+
+    def step(self, s: np.ndarray, u: np.ndarray, want_info: bool = False):
+        """One control period for all cars: s (B, NS), u (B, 2) -> (s_new, info or None)."""
+        s_new = integrator.integrate(rhs_model, np.asarray(s, dtype=np.float64), self.dt, self.n_substeps,
+                                     str(self.params.sim.integrator), np.asarray(u, dtype=np.float64),
+                                     self.model)
+        if not want_info:
+            return s_new, None
+        return s_new, derivatives_model(s_new, u, self.model, want_info=True)[1]
+
+
 # ----------------------------------------------------------------------------- factory
 def _apply_overrides(p: Params, overrides: Mapping[str, Any]) -> Params:
     """Return ``p`` with overrides applied.
@@ -634,5 +785,6 @@ def make_vehicle(tire: str = "hard_plastic_drift", surface: str = "epoxy_ptile",
     return Vehicle(p)
 
 
-__all__ = ["VehicleModel", "compile_model", "derivatives_model", "derivatives", "rhs",
-           "rhs_model", "Trajectory", "stack_info", "Vehicle", "make_vehicle"]
+__all__ = ["VehicleModel", "compile_model", "compile_model_batch", "derivatives_model", "derivatives",
+           "rhs", "rhs_model", "Trajectory", "stack_info", "Vehicle", "VehicleBatch", "make_vehicle",
+           "STRUCTURAL"]

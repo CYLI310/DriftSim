@@ -19,7 +19,7 @@ from rc_drift_sim.control.maneuvers import DRIFT_SCHEDULE, LQR_ENTRY, open_loop_
 from rc_drift_sim.sim import equilibrium as EQ
 from rc_drift_sim.sim import state as S
 from rc_drift_sim.sim.vehicle import Vehicle
-from rc_drift_sim.tests.conftest import (assert_all_finite, longest_true_run, traj_beta, traj_dt,
+from tests.helpers import (assert_all_finite, longest_true_run, traj_beta, traj_dt,
                                          traj_speed, traj_states)
 
 BETA_DRIFT_DEG = 20.0

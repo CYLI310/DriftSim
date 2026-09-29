@@ -1,6 +1,7 @@
-"""Regenerate the Milestone 1 figures, animations and summary into outputs/m1/.
+"""Regenerate the Milestone 1 figures, animations and summary into docs/images/m1/ (the images
+the README and docs show).
 
-    python scripts/make_m1_outputs.py
+    python scripts/make_figures.py
 
 Everything here is deterministic. Files are kept small (GIFs at dpi <= 80).
 """
@@ -27,7 +28,7 @@ from rc_drift_sim.sim.stability import stiffness_report  # noqa: E402
 from rc_drift_sim.sim.vehicle import Vehicle, make_vehicle  # noqa: E402
 from rc_drift_sim.viz import plots, render  # noqa: E402
 
-OUT = Path(__file__).resolve().parents[1] / "outputs" / "m1"
+OUT = Path(__file__).resolve().parents[1] / "docs" / "images" / "m1"
 
 
 def longest_drift(traj) -> tuple[float, slice]:

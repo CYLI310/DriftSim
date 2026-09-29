@@ -1,63 +1,16 @@
-"""Shared fixtures and helpers for the pytest suite (docs/DESIGN.md section 10).
+"""Plain helper functions shared by the tests (import as ``from tests.helpers import ...``).
 
-Fixtures
---------
-params   : Params                 ``default_params()`` -> hard_plastic_drift tire on epoxy_ptile
-vehicle  : Vehicle                ``Vehicle(params)`` (fresh per test)
-tires    : dict[str, TireParams]  ``load_tires()``
-surfaces : dict[str, SurfaceParams] ``load_surfaces()``
-run      : callable               ``run(vehicle, s0, action_fn_or_array, duration) -> Trajectory``
-
-Plain helper functions (importable as ``from rc_drift_sim.tests.conftest import ...``):
-``run_rollout``, ``traj_states``, ``traj_speed``, ``traj_beta``, ``traj_dt``,
-``assert_all_finite``, ``longest_true_run``.
-
-All units SI (m, s, rad); sideslip beta = atan2(vy, vx) as in state.sideslip.
+All units SI (m, s, rad); sideslip beta = atan2(vy, vx) as in ``rc_drift_sim.sim.state.sideslip``.
 """
 from __future__ import annotations
 
 from typing import Callable
 
 import numpy as np
-import pytest
 
 from rc_drift_sim.sim import state as S
-from rc_drift_sim.sim.params import Params, default_params, load_surfaces, load_tires
 
 
-# ----------------------------------------------------------------------------- fixtures
-@pytest.fixture(scope="session")
-def params() -> Params:
-    """Default parameter bundle: hard-plastic drift tire on the epoxy/P-tile track."""
-    return default_params()
-
-
-@pytest.fixture
-def vehicle(params):
-    """A fresh Vehicle wrapper around the default params (contract section 5)."""
-    from rc_drift_sim.sim.vehicle import Vehicle
-    return Vehicle(params)
-
-
-@pytest.fixture(scope="session")
-def tires():
-    """Every tire compound from configs/tires.yaml, keyed by name."""
-    return load_tires()
-
-
-@pytest.fixture(scope="session")
-def surfaces():
-    """Every surface from configs/surfaces.yaml, keyed by name."""
-    return load_surfaces()
-
-
-@pytest.fixture
-def run():
-    """``run(vehicle, s0, action_fn_or_array, duration) -> Trajectory`` (see run_rollout)."""
-    return run_rollout
-
-
-# ----------------------------------------------------------------------------- helpers
 def run_rollout(vehicle, s0, actions, duration: float):
     """Roll the vehicle out for ``duration`` seconds at the vehicle's control period.
 
@@ -79,7 +32,7 @@ def run_rollout(vehicle, s0, actions, duration: float):
         else:
             arr = arr[:n_steps]
         act = np.clip(arr, -1.0, 1.0)
-    return vehicle.rollout(np.asarray(s0, dtype=float), act, control_dt)
+    return vehicle.rollout(np.asarray(s0, dtype=float), act, control_dt, n_steps=n_steps)
 
 
 def traj_states(traj) -> np.ndarray:

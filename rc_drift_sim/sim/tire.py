@@ -171,7 +171,9 @@ class TireModel:
 
     Array fields keep the native shape of the surface / condition inputs (0-d for a scalar
     surface, (4,) per wheel). Temperature and contamination are dynamic and applied in
-    :func:`coefficients`.
+    :func:`coefficients`. For a batch of cars with different tires/surfaces every float becomes a
+    (B, 1) array and every per-wheel array (B, 4) (all fields act on per-wheel quantities); ``mode``
+    and ``use_temp`` must be shared across the batch.
     """
     mode: str
     fz0: float
@@ -318,7 +320,7 @@ def coefficients(tm: TireModel, Fz: ArrayLike, T: ArrayLike | None = None,
     Dx = mu_x * Fz
     Ex = np.minimum(np.minimum(tm.pex1 + tm.pex2 * dfz, 1.0) + tm.e_shift, 1.0)
     Kx = Fz * (tm.pkx1 + tm.pkx2 * dfz) * tm.k_scale
-    if tm.pkx3 != 0.0:                                   # configuration, not a traced value
+    if np.any(tm.pkx3 != 0.0):                           # parameter check, not a traced value
         Kx = Kx * np.exp(tm.pkx3 * dfz)
     Bx = Kx / (tm.Cx * Dx + EPS_BCD)
 

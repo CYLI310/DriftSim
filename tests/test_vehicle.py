@@ -15,7 +15,7 @@ from rc_drift_sim.sim import tire
 from rc_drift_sim.sim.params import TireCondition
 from rc_drift_sim.sim.surface import per_wheel, uniform_surface
 from rc_drift_sim.sim.vehicle import Vehicle, derivatives, make_vehicle
-from rc_drift_sim.tests.conftest import assert_all_finite
+from tests.helpers import assert_all_finite
 from rc_drift_sim.control.maneuvers import constant_actions, lane_change_actions, open_loop_drift_actions
 
 

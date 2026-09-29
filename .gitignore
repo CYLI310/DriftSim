@@ -1,0 +1,22 @@
+# Python build / cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# virtual environments
+.venv/
+venv/
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
+
+# batch data exported from the GUI / datagen (can be many GB); outputs/ stays tracked
+exports/
+
+# example outputs
+examples/output/

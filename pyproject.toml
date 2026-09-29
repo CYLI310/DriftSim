@@ -17,7 +17,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pyflakes", "pygame", "imageio"]
+dev = ["pytest", "pyflakes", "pygame"]
+
+[project.scripts]
+driftsim-datagen = "rc_drift_sim.datagen.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["rc_drift_sim*"]
@@ -26,7 +29,7 @@ include = ["rc_drift_sim*"]
 rc_drift_sim = ["configs/*.yaml"]
 
 [tool.pytest.ini_options]
-testpaths = ["rc_drift_sim/tests"]
+testpaths = ["tests"]
 addopts = "-ra"
 markers = [
   "benchmark: performance benchmarks (informational)",

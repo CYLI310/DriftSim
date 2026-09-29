@@ -1,0 +1,23 @@
+{
+  "name": "understeer_sweep",
+  "seed": 3,
+  "episodes": 60,
+  "duration_s": 6.0,
+  "params": {
+    "vehicle.cg_to_front": {"dist": "sweep", "values": [0.10, 0.133, 0.16]},
+    "init.speed": {"dist": "fixed", "value": 1.5}
+  },
+  "maneuver": {
+    "type": "constant",
+    "params": {
+      "steer": {"dist": "linspace", "low": 0.1, "high": 0.5, "num": 5},
+      "throttle": {"dist": "sweep", "values": [0.17, 0.19, 0.21, 0.23]}
+    }
+  },
+  "export": {
+    "formats": ["csv"],
+    "signals": ["pose", "velocity", "derived", "steering", "actions", "accel", "load_transfer"],
+    "decimation": 5, "float32": true, "compress": false, "shard_episodes": 64, "out_dir": "exports"
+  },
+  "run": {"workers": 0}
+}

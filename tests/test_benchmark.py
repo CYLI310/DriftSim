@@ -1,7 +1,8 @@
 """DESIGN.md section 10 item 11: physics throughput of the NumPy reference (informational).
 
 Run with ``pytest -s -m benchmark`` to see the numbers. The assertion is deliberately loose
-(> 2000 substeps/s); the printed rate is the useful output.
+(``MIN_SUBSTEPS_PER_S`` single env, ``MIN_BATCH_ENV_STEPS_PER_S`` batched); the printed rates are
+the useful output.
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import numpy as np
 import pytest
 
 from rc_drift_sim.sim.params import TireCondition
-from rc_drift_sim.tests.conftest import assert_all_finite
+from tests.helpers import assert_all_finite
 from rc_drift_sim.control.maneuvers import open_loop_drift_actions
 
 MIN_SUBSTEPS_PER_S = 1500.0          # single env, NumPy (loose; the printed number matters)

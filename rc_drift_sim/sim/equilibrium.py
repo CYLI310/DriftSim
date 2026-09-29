@@ -33,9 +33,11 @@ from scipy.optimize import least_squares
 from . import state as S
 from .vehicle import Vehicle, derivatives_model
 
-# least-squares evaluation budget per solve: converged trims need <= 40 evaluations (measured over
-# grip and drift families), so 200 leaves 5x headroom while making a failed start cheap
-MAX_NFEV = 200
+# least-squares evaluation budget per solve. Measured on the grip and drift families: warm
+# continuation steps converge in <= ~60 evaluations, cold drift solves in up to ~140 (the
+# 1.5 m/s, -30 deg drift trim takes 137). 400 keeps ~3x headroom while a start that cannot
+# converge (a point past the end of a branch) still fails fast.
+MAX_NFEV = 400
 
 # states that are in equilibrium in a steady turn (pose advances, contamination decays)
 DYN = np.array([S.VX, S.VY, S.R, *range(6, 10), S.DELTA, S.I_MOTOR, *range(12, 16),
@@ -136,15 +138,13 @@ def _solve(vehicle: Vehicle, v: float, beta: float | None, r: float | None, s0: 
 def solve_trim(vehicle: Vehicle, v: float, beta: float | None = None, r: float | None = None,
                guess: Trim | None = None, r_guess: float | None = None,
                steer_guess: float | None = None, thr_guess: float | None = None,
-               kappa_rear_guess: float | None = None, max_nfev: int = MAX_NFEV,
-               max_starts: int | None = None) -> Trim:
+               kappa_rear_guess: float | None = None, max_nfev: int = MAX_NFEV) -> Trim:
     """Solve for a steady turn at speed ``v`` (m/s) with EITHER sideslip ``beta`` (rad; natural for
     drift equilibria) OR yaw rate ``r`` (rad/s; natural for grip cornering, ``radius = v/r``).
 
     ``guess``: a nearby :class:`Trim` to warm-start from (continuation). Without it, the solver
     tries the given guesses (``r_guess`` rad/s, ``steer_guess``, ``thr_guess``, ``kappa_rear_guess``)
-    and, if they are not all given, a small multi-start set (``max_starts`` caps it), keeping the
-    best solution. Use ``kappa_rear_guess`` ~0.3-1 to aim for the saturated-rear drift branch.
+    and, if they are not all given, a small multi-start set, keeping the best solution. Use ``kappa_rear_guess`` ~0.3-1 to aim for the saturated-rear drift branch.
     """
     if (beta is None) == (r is None):
         raise ValueError("give exactly one of beta or r")
@@ -171,8 +171,6 @@ def solve_trim(vehicle: Vehicle, v: float, beta: float | None = None, r: float |
     if steer_guess is not None or kappa_rear_guess is not None:
         starts = [(steer_guess if steer_guess is not None else starts[0][0],
                    kappa_rear_guess if kappa_rear_guess is not None else starts[0][1])] + starts
-    if max_starts is not None:
-        starts = starts[:max(int(max_starts), 1)]
     best: Trim | None = None
     for sg, kr in starts:
         s0, u0 = _initial_guess(vehicle, v, beta0, r0, sg, thr_guess, kr)
@@ -224,20 +222,6 @@ def continuation(vehicle: Vehicle, v: float, values, key: str = "beta", start: T
         out.append(tr)
         prev = tr if tr.success else prev
     return out
-
-
-def trim_family(vehicle: Vehicle, v: float, values, key: str = "beta", anchor: int | None = None,
-                **first_kwargs) -> list[Trim]:
-    """A family of trims over ``values``, solved cold at ``values[anchor]`` (default: the middle,
-    where the equilibrium is best established) and continued outward in both directions.
-    Returns the trims in the order of ``values``."""
-    vals = list(values)
-    a = len(vals) // 2 if anchor is None else int(anchor)
-    first = solve_trim(vehicle, v, **{key: float(vals[a])}, **first_kwargs)
-    start = first if first.success else None
-    up = continuation(vehicle, v, vals[a + 1:], key=key, start=start, **first_kwargs)
-    down = continuation(vehicle, v, vals[:a][::-1], key=key, start=start, **first_kwargs)
-    return down[::-1] + [first] + up
 
 
 def linearize(vehicle: Vehicle, trim: Trim, eps: float = 1e-6

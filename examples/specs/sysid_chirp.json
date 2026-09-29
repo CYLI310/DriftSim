@@ -1,0 +1,25 @@
+{
+  "name": "sysid_chirp",
+  "seed": 2,
+  "episodes": 120,
+  "duration_s": 10.0,
+  "params": {
+    "surface": {"dist": "sweep", "values": ["epoxy_ptile", "dry_asphalt", "carpet"]},
+    "init.speed": {"dist": "fixed", "value": 1.5}
+  },
+  "maneuver": {
+    "type": "chirp",
+    "params": {
+      "throttle": {"dist": "linspace", "low": 0.17, "high": 0.26, "num": 4},
+      "amplitude": {"dist": "uniform", "low": 0.2, "high": 0.5},
+      "f0_hz": {"dist": "fixed", "value": 0.1},
+      "f1_hz": {"dist": "fixed", "value": 4.0}
+    }
+  },
+  "export": {
+    "formats": ["npz", "csv"],
+    "signals": ["pose", "velocity", "derived", "wheel_speeds", "steering", "actions", "accel", "motor"],
+    "decimation": 1, "float32": false, "compress": false, "shard_episodes": 64, "out_dir": "exports"
+  },
+  "run": {"workers": 0}
+}
