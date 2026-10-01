@@ -20,6 +20,7 @@ rc_drift_sim/
                         equilibrium (trims, linearization), stability (stiffness guard)
   control/              maneuvers (open-loop schedules), lqr (TrimLQR, LQRDriftPolicy)
   datagen/              batch dataset generation (catalog, spec, sampling, inputs, runner, export)
+  app/                  web GUI: server.py (stdlib HTTP server + JSON API), static/ (page, no build step)
   viz/                  render (top-down, animations), plots (time series, tire curves, g-g)
 examples/               quickstart.py, batch_export.py, specs/*.json
 scripts/                make_figures.py (docs/images/m1), tune_drift.py, make_param_reference.py
@@ -27,7 +28,8 @@ tests/                  pytest suite (helpers.py holds shared helper functions)
 docs/                   DESIGN.md (this contract), DATA_GENERATION.md, PARAMETERS.md (generated), images/
 ```
 Dependency direction: `sim` depends on nothing else in the package; `control`, `viz` and `datagen`
-depend on `sim`; `tests`, `examples` and `scripts` depend on everything; nothing depends on them.
+depend on `sim`; `app` depends on `datagen`; `tests`, `examples` and `scripts` depend on everything;
+nothing depends on them.
 The Gymnasium env, training and system identification packages are added with Milestones 4-8.
 
 ## 1. Conventions

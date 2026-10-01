@@ -20,3 +20,9 @@ exports/
 
 # example outputs
 examples/output/
+
+# macOS launcher built by scripts/mac/make_app.sh (it stores this checkout's path)
+/DriftSim.app/
+
+# local tool configuration
+.claude/

@@ -23,6 +23,8 @@ policy that drifts on many surfaces and tire conditions and then runs on a real 
   latency and so on, step together in one vectorized batch.
 - **Dataset export.** Describe what to vary in a JSON spec and get NPZ / CSV / Parquet files with a
   manifest and a per-episode summary, generated in parallel on all CPU cores.
+- **Web GUI.** Change any variable, preview a few episodes, run large batches in the background and
+  download the results, all from a local page in your browser.
 - **Analysis tools.** Steady-state (trim) solver, stability analysis, an LQR drift controller,
   a top-down renderer and time-series plots.
 - **Checked against physics.** Over 100 tests, including understeer against textbook theory and exact
@@ -34,7 +36,7 @@ policy that drifts on many surfaces and tire conditions and then runs on a real 
 |---|---|
 | 1. Physics model, visualizer, tests | **done** |
 | Batch data generation (command line and Python) | **done** |
-| Web GUI for batch export | in progress |
+| Web GUI for batch export | **done** |
 | 2. Surface maps and roughness (tire-condition model already done) | next |
 | 3. JAX port for GPU-scale speed | planned |
 | 4. Gymnasium environment and drift rewards | planned |
@@ -73,7 +75,48 @@ heavier = make_vehicle("hard_plastic_drift", "epoxy_ptile", mass=1.9, latency=0.
 Run `python examples/quickstart.py` for the full version: it also simulates several different cars
 in one batch and saves a plot and an animation.
 
-## Generate datasets
+## Web GUI
+
+```bash
+driftsim-gui
+```
+
+This opens `http://127.0.0.1:8765` in your browser (only your computer can connect).
+
+<p align="center">
+  <img src="docs/images/gui.jpg" width="800" alt="The DriftSim dataset GUI">
+</p>
+
+- **Change variables easily.** Every variable is listed with its unit and a plain description. Set
+  any of them to fixed, random (uniform, normal, log-uniform, pick from a list) or a sweep grid.
+  "× default" scales each tire's or surface's own value, and tire condition can differ per wheel.
+  Press `/` to search all 119 variables.
+- **See what you will get.** The summary checks the spec as you type and estimates size and run
+  time. Preview simulates a few episodes and plots their paths, speed, sideslip and inputs.
+- **Run and download.** Start runs in the background with progress and cancel (further runs
+  queue). Datasets appear under Runs & datasets, where you can download a zip or single files, open
+  the folder, or load an old dataset's spec to tweak and rerun.
+- **Same files as the command line.** Save JSON writes a spec that `driftsim-datagen` runs as is,
+  and the Examples menu loads the specs in `examples/specs/`.
+
+Options: `--port`, `--out` (export folder), `--no-browser`.
+
+**Start it without a terminal (macOS).** Build the launcher app once:
+
+```bash
+scripts/mac/make_app.sh
+```
+
+Then double-click `DriftSim.app` (in the repository folder; you can drag it to the Dock or
+Applications). It starts the server in the background and opens the page. Double-click it again
+to open the page or stop the server. Alternatively, double-click `scripts/mac/Start DriftSim.command`
+to run the server in a Terminal window; closing the window stops it.
+
+From a shell, `scripts/driftsim-gui.sh` does the same: `--background`, `--stop`, `--status`.
+Background logs go to `~/Library/Logs/DriftSim/server.log`. Stopping cancels a run in progress
+and keeps the files already written.
+
+## Generate datasets from the command line
 
 ```bash
 driftsim-datagen examples/specs/domain_randomization.json
@@ -136,9 +179,11 @@ DriftSim/
 │   │                      trim / stability analysis, parameter and state definitions
 │   ├── control/           open-loop maneuvers and the LQR drift controller
 │   ├── datagen/           batch dataset generation (driftsim-datagen)
+│   ├── app/               web GUI (driftsim-gui): local server and the page in static/
 │   └── viz/               top-down renderer, animations, time-series plots
 ├── examples/              quickstart.py, batch_export.py, specs/*.json ready-made datasets
-├── scripts/               make_figures.py, tune_drift.py, make_param_reference.py
+├── scripts/               driftsim-gui.sh (start / stop the GUI), mac/ (DriftSim.app launcher),
+│                          make_figures.py, tune_drift.py, make_param_reference.py
 ├── tests/                 pytest suite
 └── docs/
     ├── DATA_GENERATION.md how to make datasets

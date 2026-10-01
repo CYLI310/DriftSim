@@ -30,11 +30,12 @@ def main():
     print(f"\n{summary['status']}: {summary['episodes_written']} episodes in {summary['seconds']:.1f} s "
           f"-> {summary['out_dir']}")
 
-    # read it back: one NPZ per shard, one row per episode in episodes.csv
-    shard = np.load(sorted(glob.glob(f"{summary['out_dir']}/shard_*.npz"))[0])
+    # read it back: one NPZ per shard, one row per episode in episodes.csv; all/ holds every episode,
+    # not_spun/ the same files with only the episodes that did not spin out
+    shard = np.load(sorted(glob.glob(f"{summary['out_dir']}/all/shard_*.npz"))[0])
     print("signals:", [k for k in shard.files if k not in ("episode_id", "t")])
     print("speed array:", shard["speed"].shape, "(episodes, time steps); wheel speeds:", shard["omega"].shape)
-    rows = list(csv.DictReader(open(f"{summary['out_dir']}/episodes.csv")))
+    rows = list(csv.DictReader(open(f"{summary['out_dir']}/all/episodes.csv")))
     spun = sum(r["spun"] == "True" for r in rows)
     print(f"{spun} of {len(rows)} episodes spun out; first row: tire={rows[0]['tire']}, surface={rows[0]['surface']}, "
           f"mass={float(rows[0]['vehicle.mass']):.2f} kg")

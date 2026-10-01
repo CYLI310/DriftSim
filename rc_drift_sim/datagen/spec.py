@@ -16,8 +16,8 @@ A spec is a plain dict (JSON-serializable)::
       "maneuver": {"type": "drift_schedule",
                    "params": {"sustain_throttle": {"dist": "uniform", "low": 0.21, "high": 0.24}}},
       "export": {"formats": ["npz"], "signals": ["pose", "velocity", "derived", "actions"],
-                 "decimation": 1, "float32": true, "compress": false, "shard_episodes": 256,
-                 "out_dir": "exports"},
+                 "record_rate": "control", "decimation": 1, "float32": true, "compress": false,
+                 "shard_episodes": 256, "out_dir": "exports"},
       "run": {"workers": 0}
     }
 
@@ -49,6 +49,7 @@ DISTS = {
     "sweep": ("values",), "linspace": ("low", "high", "num"),
 }
 SWEEPS = ("sweep", "linspace")
+RECORD_RATES = ("control", "physics")    # record every control step, or every physics (integrator) step
 MAX_EPISODES = 2_000_000
 MAX_DURATION_S = 600.0
 DEFAULT_SIGNALS = ["pose", "velocity", "derived", "wheel_speeds", "steering", "actions", "accel"]
@@ -59,8 +60,9 @@ def default_spec() -> dict:
         "name": "batch", "seed": 0, "episodes": 64, "duration_s": 4.0,
         "params": {},
         "maneuver": {"type": "drift_schedule", "params": {}},
-        "export": {"formats": ["npz"], "signals": list(DEFAULT_SIGNALS), "decimation": 1, "float32": True,
-                   "compress": False, "shard_episodes": 256, "out_dir": "exports"},
+        "export": {"formats": ["npz"], "signals": list(DEFAULT_SIGNALS), "record_rate": "control",
+                   "decimation": 1, "float32": True, "compress": False, "shard_episodes": 256,
+                   "out_dir": "exports"},
         "run": {"workers": 0},
     }
 
@@ -94,6 +96,22 @@ def _range_of(d: dict) -> list[float]:
     if kind == "linspace":
         return [d["low"], d["high"]]
     return []
+
+
+def _varies(d: dict) -> bool:
+    """True if the distribution can give two episodes different values."""
+    kind = d["dist"]
+    if kind == "fixed":
+        return False
+    if kind == "bernoulli":
+        return 0 < d["p"] < 1
+    if kind == "normal":
+        return d["std"] > 0 and d.get("low", -math.inf) < d.get("high", math.inf)
+    if kind in ("choice", "sweep"):
+        w = d.get("weights", [1.0] * len(d["values"]))
+        vals = [v for v, wi in zip(d["values"], w) if wi > 0]
+        return any(v != vals[0] for v in vals[1:])
+    return d["low"] != d["high"] and (kind != "linspace" or d["num"] > 1)
 
 
 def _check_dist(key: str, d: Any, field: dict, errors: list[str]) -> dict | None:
@@ -260,6 +278,8 @@ def validate_spec(spec: dict) -> tuple[dict, list[str], list[str]]:
         errors.append("export.signals must be a non-empty list")
     elif any(s not in sig_keys for s in sigs):
         errors.append(f"unknown signal groups {[s for s in sigs if s not in sig_keys]}")
+    if exp.get("record_rate") not in RECORD_RATES:
+        errors.append(f"export.record_rate must be one of {list(RECORD_RATES)}")
     if not isinstance(exp.get("decimation"), int) or exp["decimation"] < 1:
         errors.append("export.decimation must be an integer >= 1")
     if not isinstance(exp.get("shard_episodes"), int) or not 1 <= exp["shard_episodes"] <= 65536:
@@ -278,6 +298,13 @@ def validate_spec(spec: dict) -> tuple[dict, list[str], list[str]]:
         return out, errors, warnings
 
     # ---- warnings and derived facts
+    mirror = mparams.get("mirror_prob")
+    mixed_mirror = mirror is not None and mirror["dist"] == "fixed" and 0 < mirror["value"] < 1
+    if out["episodes"] > 1 and not (mtype == "random" or mixed_mirror
+                                    or any(_varies(d) for d in [*norm_params.values(), *mparams.values()])):
+        warnings.append(f"nothing varies between episodes, so all {out['episodes']} episodes will be identical "
+                        f"(the simulation is deterministic): randomize or sweep a parameter, use the random "
+                        f"maneuver, or set mirror_prob between 0 and 1")
     grid = 1
     for k, d in list(norm_params.items()) + [(f"maneuver.{k}", d) for k, d in mparams.items()]:
         if d["dist"] in SWEEPS:
@@ -303,10 +330,15 @@ def estimate(spec: dict) -> dict:
     """Steps, records and approximate output size of a (normalized) spec."""
     from .export import signal_columns
     idx = field_index()
-    dt = spec["params"].get("sim.control_dt", {}).get("value", idx["sim.control_dt"]["default"])
-    dt = float(dt) if _is_num(dt) else float(idx["sim.control_dt"]["default"])
+
+    def fixed(key: str) -> float:
+        v = spec["params"].get(key, {}).get("value", idx[key]["default"])
+        return float(v) if _is_num(v) else float(idx[key]["default"])
+
+    dt = fixed("sim.control_dt")
     T = max(1, int(round(spec["duration_s"] / dt)))
-    T_rec = T // spec["export"]["decimation"] + 1
+    steps = T * max(1, int(round(dt / fixed("sim.dt")))) if spec["export"].get("record_rate") == "physics" else T
+    T_rec = steps // spec["export"]["decimation"] + 1
     cols = sum(len(c) for c in signal_columns(spec["export"]["signals"]).values())
     bytes_per = 4 if spec["export"]["float32"] else 8
     n = spec["episodes"]

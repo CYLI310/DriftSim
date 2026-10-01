@@ -21,12 +21,13 @@ dev = ["pytest", "pyflakes", "pygame"]
 
 [project.scripts]
 driftsim-datagen = "rc_drift_sim.datagen.__main__:main"
+driftsim-gui = "rc_drift_sim.app.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["rc_drift_sim*"]
 
 [tool.setuptools.package-data]
-rc_drift_sim = ["configs/*.yaml"]
+rc_drift_sim = ["configs/*.yaml", "app/static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

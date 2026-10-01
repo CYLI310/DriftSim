@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DriftSim Datasets</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏎️</text></svg>">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">◢</span>
+      <div>
+        <div class="title">DriftSim <span class="muted">Datasets</span></div>
+        <div class="subtitle" id="server-status">connecting…</div>
+      </div>
+    </div>
+    <div class="top-actions">
+      <div class="menu" id="examples-menu">
+        <button class="btn" id="examples-btn" aria-haspopup="true" aria-expanded="false">Examples ▾</button>
+        <div class="menu-list" id="examples-list" role="menu"></div>
+      </div>
+      <button class="btn" id="import-btn" title="Load a spec or manifest.json">Import</button>
+      <input type="file" id="import-file" accept=".json,application/json" hidden>
+      <button class="btn" id="export-btn" title="Download this spec as JSON">Save JSON</button>
+      <button class="btn" id="json-btn" title="View and edit the spec as JSON">{ } JSON</button>
+      <button class="btn btn-ghost" id="reset-btn" title="Start over from the defaults">Reset</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="sidebar" id="sidebar" aria-label="Sections"></nav>
+
+    <main class="editor" id="editor">
+      <div class="editor-toolbar">
+        <input type="search" id="search" placeholder="Search variables…  (press /)" aria-label="Search variables" autocomplete="off">
+        <label class="toggle" title="Show numerical and fine-tuning settings too">
+          <input type="checkbox" id="advanced"> <span>Advanced</span>
+        </label>
+      </div>
+      <div id="content"></div>
+    </main>
+
+    <aside class="summary" id="summary" aria-label="Summary"></aside>
+  </div>
+
+  <dialog id="preview-dialog" class="dialog wide" aria-labelledby="preview-title">
+    <div class="dialog-head">
+      <h2 id="preview-title">Preview</h2>
+      <div class="dialog-head-actions">
+        <label class="inline-field">episodes
+          <select id="preview-n"><option>2</option><option>4</option><option selected>6</option><option>8</option></select>
+        </label>
+        <button class="btn" id="preview-rerun">Run again</button>
+        <button class="btn btn-ghost icon" data-close aria-label="Close">✕</button>
+      </div>
+    </div>
+    <div id="preview-body" class="dialog-body"></div>
+  </dialog>
+
+  <dialog id="json-dialog" class="dialog" aria-labelledby="json-title">
+    <div class="dialog-head">
+      <h2 id="json-title">Spec JSON</h2>
+      <div class="dialog-head-actions">
+        <button class="btn" id="json-copy">Copy</button>
+        <button class="btn btn-primary" id="json-apply">Apply</button>
+        <button class="btn btn-ghost icon" data-close aria-label="Close">✕</button>
+      </div>
+    </div>
+    <div class="dialog-body">
+      <p class="muted small">This is exactly what the command line takes: <code>driftsim-datagen spec.json</code>. Edit it and press Apply.</p>
+      <textarea id="json-text" spellcheck="false" aria-label="Spec JSON"></textarea>
+      <div id="json-error" class="error-text"></div>
+    </div>
+  </dialog>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

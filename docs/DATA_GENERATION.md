@@ -16,7 +16,11 @@ exports the time series for training, system identification or analysis.
 
 ## Quick start
 
-Run one of the ready-made specs in `examples/specs/`:
+The easiest way is the web GUI: run `driftsim-gui`, change what you want to vary, press Preview and
+Start. It edits exactly the specs described below (Save JSON / Import), so everything here also
+applies to it.
+
+From the command line, run one of the ready-made specs in `examples/specs/`:
 
 ```bash
 driftsim-datagen examples/specs/drift_dataset.json
@@ -151,7 +155,8 @@ are listed in [PARAMETERS.md](PARAMETERS.md#maneuvers).
 |---|---|---|
 | `formats` | any of `npz`, `csv`, and `parquet` (when pyarrow is installed) | `["npz"]` |
 | `signals` | signal groups to record, see [PARAMETERS.md](PARAMETERS.md#signals) | pose, velocity, derived, wheel_speeds, steering, actions, accel |
-| `decimation` | record every n-th control step | `1` (50 Hz) |
+| `record_rate` | `"control"`: record at control steps (50 Hz); `"physics"`: record every integrator step (1 kHz), about 20x more rows | `"control"` |
+| `decimation` | record every n-th step of the record rate | `1` (50 Hz) |
 | `float32` | store single precision (half the size) | `true` |
 | `compress` | compressed NPZ / zstd Parquet (smaller, slower) | `false` |
 | `shard_episodes` | maximum episodes per shard file | `256` |
@@ -159,25 +164,31 @@ are listed in [PARAMETERS.md](PARAMETERS.md#maneuvers).
 
 Signal groups include body velocities, wheel speeds, steering angle, commanded and applied
 actions, IMU-like accelerations, tire forces and loads, slips, effective grip, tire temperatures,
-load transfer, motor current and torque, and slip power.
+load transfer, motor current and torque, motor voltage, motor RPM and battery voltage, and slip power.
 
 ## What gets written
 
 ```
 exports/20260929-083740_my_dataset/
-├── manifest.json     the full spec, versions, git commit, signal names and units, shards, timing, status
-├── episodes.csv      one row per episode: every sampled variable and the outcome metrics
-├── shard_0000.npz    the time series of episodes 0..n
-├── shard_0000.csv    (if requested) the same as a long table
-└── README.txt        how to load the files
+├── manifest.json         the full spec, versions, git commit, signal names and units, shards, timing, status
+├── README.txt            how to load the files
+├── all/                  every episode, spun out or not
+│   ├── episodes.csv      one row per episode: every sampled variable and the outcome metrics
+│   ├── shard_0000.npz    the time series of episodes 0..n
+│   └── shard_0000.csv    (if requested) the same as a long table
+└── not_spun/             the same layout with only the episodes that did not spin out (spun = False)
+    ├── episodes.csv
+    └── shard_0000.npz    the non-spun episodes of all/shard_0000.npz (no file if all of them spun)
 ```
+
+`not_spun/` repeats those episodes' data, so it adds the non-spun fraction of the size on disk.
 
 Reading an NPZ shard:
 
 ```python
 import numpy as np
-d = np.load("shard_0000.npz")
-d["episode_id"]   # (n,)          rows of episodes.csv
+d = np.load("all/shard_0000.npz")   # or "not_spun/shard_0000.npz"
+d["episode_id"]   # (n,)          rows of episodes.csv in the same folder
 d["t"]            # (T,)          seconds
 d["speed"]        # (n, T)        one array per scalar signal
 d["omega"]        # (n, T, 4)     per-wheel signals, wheel order FL, FR, RL, RR
@@ -186,10 +197,16 @@ d["omega"]        # (n, T, 4)     per-wheel signals, wheel order FL, FR, RL, RR
 CSV and Parquet shards are long tables with one row per (episode, time) and per-wheel signals
 expanded into `name_fl`, `name_fr`, `name_rl`, `name_rr` columns.
 
-**Timing.** Row `k` is the state at `t = k * decimation * control_dt`. `steer_cmd` / `throttle_cmd`
-are the commands issued at that time; `steer_applied` / `throttle_applied` are the commands reaching
-the car after the control latency (zero until the first command arrives). Forces and accelerations
-are evaluated at the recorded state with the applied command.
+**Timing.** Row `k` is the state at `t = k * decimation * step`, where `step` is `control_dt`
+(20 ms) at the default `record_rate` and the physics `dt` (1 ms) with `"record_rate": "physics"`.
+`steer_cmd` / `throttle_cmd` are the commands in force at that time; `steer_applied` /
+`throttle_applied` are the commands reaching the car after the control latency (zero until the first
+command arrives). Commands change only at control steps, while the state (steering angle after the
+servo, wheel and motor speed, motor current and voltage, ...) moves every physics step. Forces,
+accelerations and voltages are evaluated at the recorded state with the applied command. The
+physics rate gives the same states as the control rate at every 20th row; it is meant for comparing
+with high-rate logs from a real car, and shards are made smaller so a shard's buffers stay under
+about 256 MB.
 
 **Outcome metrics** in `episodes.csv`, computed at the full control rate:
 
@@ -238,8 +255,9 @@ Tips: keep structural settings fixed; use `float32` and only the signal groups y
 3. Groups are cut into shards and the shards run in parallel worker processes. Each worker samples
    its own episodes by id, simulates them with per-car control latency, records the signals and
    writes its shard.
-4. `episodes.csv` and `manifest.json` are written at the end. Cancelling or a failure keeps the shards
-   already written and records the status in the manifest.
+4. Each shard goes into `all/`, and its non-spun episodes also into `not_spun/` under the same shard
+   number. The two `episodes.csv` tables and `manifest.json` are written at the end. Cancelling or
+   a failure keeps the shards already written and records the status in the manifest.
 
 The code is in `rc_drift_sim/datagen/`: `catalog.py` (variables and their metadata), `spec.py`
 (spec format and validation), `sampling.py`, `inputs.py` (maneuvers), `runner.py` and `export.py`.

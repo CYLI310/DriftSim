@@ -13,8 +13,9 @@ Pipeline
 3. Each group is cut into shards of ``export.shard_episodes`` episodes; shards run in a process
    pool (``run.workers``, 0 = automatic) and each worker samples its own episodes by id, so the
    parent never holds all parameter sets in memory.
-4. Every shard is written as soon as it is done (``export.write_shard``); ``episodes.csv`` and
-   ``manifest.json`` are written at the end (the manifest is also written at the start with
+4. Every shard is written as soon as it is done (``export.write_shard``) into ``all/``, and its
+   episodes that did not spin out also into ``not_spun/`` (same shard number); the two
+   ``episodes.csv`` tables and ``manifest.json`` are written at the end (the manifest is also written at the start with
    status "running", and on cancellation or failure with the matching status).
 
 Control latency: each car's commands reach the car ``round(latency / control_dt)`` control steps
@@ -42,10 +43,11 @@ from ..sim.vehicle import VehicleBatch, derivatives_model
 from . import export as X
 from . import inputs
 from .sampling import Sampler, structural_signature
-from .spec import validate_spec
+from .spec import estimate, validate_spec
 
 BETA_DRIFT_DEG, BETA_SPIN_DEG, DRIFT_MIN_SPEED, MOVING = 20.0, 80.0, 0.8, 0.05
 PROGRESS_EVERY = 10          # control steps between progress / cancel checks inside a shard
+MAX_SHARD_BYTES = 256e6      # cap on a shard's float64 signal buffers (matters at the physics record rate)
 
 
 class SpecError(ValueError):
@@ -84,10 +86,12 @@ def simulate_episodes(spec: dict, ids: list[int], groups: list[str] | None = Non
     B = len(eps)
     cdt = batch.control_dt
     T = max(1, int(round(spec["duration_s"] / cdt)))
+    physics = spec["export"].get("record_rate") == "physics"
+    n_rec = batch.n_substeps if physics else 1        # recordable steps per control step
     dec = int(spec["export"]["decimation"])
-    rec = list(range(0, T + 1, dec))
+    rec = list(range(0, T * n_rec + 1, dec))
     T_rec = len(rec)
-    t = np.asarray(rec, dtype=np.float64) * cdt
+    t = np.asarray(rec, dtype=np.float64) * (batch.dt if physics else cdt)
 
     init = {k: np.array([e.init[k] for e in eps]) for k in ("x", "y", "yaw", "v", "beta", "yaw_rate")}
     s = batch.initial_states(x=init["x"], y=init["y"], yaw=init["yaw"], v=init["v"], beta=init["beta"],
@@ -127,7 +131,7 @@ def simulate_episodes(spec: dict, ids: list[int], groups: list[str] | None = Non
                 val = (cmd if key.startswith("cmd") else applied)[a_idx, :, int(key[-1])]
             else:
                 val = np.asarray(info[key])
-            data[sg["name"]][:, j_rec] = val
+            data[sg["name"]][:, j_rec] = val * sg["scale"] if "scale" in sg else val
 
     def metrics(s: np.ndarray) -> None:
         nonlocal max_beta, drift_time, spun, max_speed, max_r, dist
@@ -148,11 +152,13 @@ def simulate_episodes(spec: dict, ids: list[int], groups: list[str] | None = Non
             record(0, 0, s)
             j = 1
         for k in range(T):
-            s, _ = batch.step(s, applied[k])
+            for m in range(n_rec):                    # physics rate: one integrator step at a time
+                s, _ = batch.step(s, applied[k], n_sub=None if n_rec == 1 else 1)
+                idx = k * n_rec + m + 1
+                if j < T_rec and rec[j] == idx:
+                    record(j, idx // n_rec, s)
+                    j += 1
             metrics(s)
-            if j < T_rec and rec[j] == k + 1:
-                record(j, k + 1, s)
-                j += 1
             if (k + 1) % PROGRESS_EVERY == 0:
                 if tick is not None:
                     tick((k + 1) / T)
@@ -190,12 +196,22 @@ def _run_shard(task: dict) -> dict:
     except Cancelled:
         return dict(key=key, status="cancelled")
     exp = task["spec"]["export"]
-    files = X.write_shard(Path(task["out_dir"]), task["shard"], np.asarray(task["ids"]), t, data,
-                          exp["formats"], exp["float32"], exp["compress"])
+    root, ids = Path(task["out_dir"]), np.asarray(task["ids"])
+
+    def write(folder: str, sel: Any) -> list[str]:
+        sub = {k: v[sel] for k, v in data.items()}
+        return [f"{folder}/{f}" for f in X.write_shard(root / folder, task["shard"], ids[sel], t, sub,
+                                                       exp["formats"], exp["float32"], exp["compress"])]
+
+    not_spun = np.array([not r["spun"] for r in rows])
+    files = write(X.ALL_DIR, slice(None))
+    if not_spun.any():                           # the same shard number, only the episodes that did not spin
+        files += write(X.NOT_SPUN_DIR, not_spun)
     for r in rows:
         r["shard"] = task["shard"]
         r["group"] = task["group"]
     return dict(key=key, status="ok", shard=task["shard"], files=files, rows=rows, n=n,
+                not_spun=int(not_spun.sum()),
                 first_id=int(task["ids"][0]), last_id=int(task["ids"][-1]),
                 seconds=time.perf_counter() - t0, T_rec=len(t))
 
@@ -238,7 +254,9 @@ def plan(spec: dict, workers: int | None = None) -> tuple[dict, list[dict], list
             probs.append(f"structural group {sig}: {exc}")
     if probs:
         raise SpecError(probs)
-    max_size = norm["export"]["shard_episodes"]
+    est = estimate(norm)
+    per_episode = est["records_per_episode"] * est["columns"] * 8
+    max_size = max(1, min(norm["export"]["shard_episodes"], int(MAX_SHARD_BYTES // max(per_episode, 1))))
     w = workers if workers not in (None, 0) else (norm["run"]["workers"] or _auto_workers())
     tasks, shard = [], 0
     for gi, (sig, ids) in enumerate(sorted(groups.items(), key=lambda kv: kv[1][0])):
@@ -247,6 +265,12 @@ def plan(spec: dict, workers: int | None = None) -> tuple[dict, list[dict], list
             tasks.append(dict(key=f"s{shard}", shard=shard, group=gi, ids=ids[a:a + size]))
             shard += 1
     return norm, tasks, warnings
+
+
+def _record_dt(norm: dict) -> float:
+    sim = Sampler(norm).episode(0).params.sim
+    step = sim.dt if norm["export"].get("record_rate") == "physics" else sim.control_dt
+    return float(norm["export"]["decimation"]) * float(step)
 
 
 def _git_commit() -> str | None:
@@ -286,7 +310,8 @@ def run_batch(spec: dict, out_root: str | Path | None = None,
     while out_dir.exists():
         out_dir = root / f"{stamp}_{norm['name']}_{k}"
         k += 1
-    out_dir.mkdir(parents=True)
+    for folder in (X.ALL_DIR, X.NOT_SPUN_DIR):
+        (out_dir / folder).mkdir(parents=True)
     (out_dir / "README.txt").write_text(X.README)
     t_start = time.time()
     manifest = dict(format_version=1, created=_dt.datetime.now().isoformat(timespec="seconds"),
@@ -316,7 +341,7 @@ def run_batch(spec: dict, out_root: str | Path | None = None,
         nonlocal done_full
         if res["status"] == "ok":
             rows.extend(res["rows"])
-            shards.append(dict(file=res["files"], shard=res["shard"], episodes=res["n"],
+            shards.append(dict(file=res["files"], shard=res["shard"], episodes=res["n"], not_spun=res["not_spun"],
                                first_id=res["first_id"], last_id=res["last_id"], seconds=round(res["seconds"], 3)))
             done_full += res["n"]
 
@@ -379,23 +404,26 @@ def run_batch(spec: dict, out_root: str | Path | None = None,
     if failed_shards and status == "complete":
         status, error = "failed", f"{len(failed_shards)} shard(s) failed: " + "; ".join(failed_shards[:5])
     elapsed = time.time() - t_start
-    X.write_episodes_table(out_dir / "episodes.csv", rows)
+    X.write_episodes_table(out_dir / X.ALL_DIR / "episodes.csv", rows)
+    X.write_episodes_table(out_dir / X.NOT_SPUN_DIR / "episodes.csv", rows, keep=lambda r: not r["spun"])
     shards.sort(key=lambda s: s["shard"])
     written = sum(s["episodes"] for s in shards)
     stats = {}
     if rows:
         stats = dict(drift_fraction=float(np.mean([r["drift_time_s"] >= 1.0 for r in rows])),
                      spun_fraction=float(np.mean([r["spun"] for r in rows])),
+                     not_spun_episodes=int(sum(not r["spun"] for r in rows)),
                      non_finite=int(sum(not r["finite"] for r in rows)),
                      mean_max_abs_beta_deg=float(np.nanmean([r["max_abs_beta_deg"] for r in rows])))
     manifest.update(status=status, error=error, shards=shards, episodes_written=written,
                     seconds=round(elapsed, 3), episodes_per_s=round(written / max(elapsed, 1e-9), 2),
                     workers=w, stats=stats, finished=_dt.datetime.now().isoformat(timespec="seconds"),
-                    record_dt=float(norm["export"]["decimation"]) * float(Sampler(norm).episode(0).params.sim.control_dt))
+                    record_dt=_record_dt(norm))
     X.write_json(out_dir / "manifest.json", manifest)
     report(0.0, stage=status)
-    files = sorted(p.name for p in out_dir.iterdir())
-    size = sum(p.stat().st_size for p in out_dir.iterdir())
+    paths = [p for p in out_dir.rglob("*") if p.is_file()]
+    files = sorted(p.relative_to(out_dir).as_posix() for p in paths)
+    size = sum(p.stat().st_size for p in paths)
     return dict(status=status, error=error, out_dir=str(out_dir), episodes=n, episodes_written=written,
                 seconds=elapsed, workers=w, files=files, bytes=size, warnings=warnings, stats=stats)
 
@@ -406,7 +434,7 @@ def preview(spec: dict, n: int = 6) -> dict:
     if errors:
         raise SpecError(errors)
     norm = dict(norm, episodes=min(norm["episodes"], n))
-    norm["export"] = dict(norm["export"], decimation=1)
+    norm["export"] = dict(norm["export"], decimation=1, record_rate="control")
     groups = ["pose", "velocity", "derived", "actions", "steering"]
     sampler = Sampler(norm)
     by_sig: dict[tuple, list[int]] = {}
@@ -418,7 +446,7 @@ def preview(spec: dict, n: int = 6) -> dict:
         t, data, rows = simulate_episodes(norm, ids, groups=groups)
         t_arr = t
         for b, r in enumerate(rows):
-            out_eps.append(dict(row=r, x=data["x"][b], y=data["y"][b], speed=data["speed"][b],
+            out_eps.append(dict(row=r, t=t, x=data["x"][b], y=data["y"][b], speed=data["speed"][b],
                                 beta_deg=np.degrees(data["beta"][b]), yaw_rate_deg_s=np.degrees(data["yaw_rate"][b]),
                                 steer_cmd=data["steer_cmd"][b], throttle_cmd=data["throttle_cmd"][b],
                                 delta_deg=np.degrees(data["delta"][b])))

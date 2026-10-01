@@ -159,6 +159,14 @@ def esc_command_m(dm: DrivetrainModel, i, omega_m, thr) -> tuple[np.ndarray, np.
     return v_cmd, g
 
 
+def voltages_m(dm: DrivetrainModel, i, omega_m, thr) -> tuple[np.ndarray, np.ndarray]:
+    """Battery terminal voltage and mean motor terminal voltage ``Ke*omega_m + g_eff*(V_cmd - Ke*omega_m)``
+    (V), i.e. ``R_m*i + L di/dt + Ke*omega_m`` of ``current_derivative_m``. Diagnostics only."""
+    v_cmd, g = esc_command_m(dm, i, omega_m, thr)
+    emf = dm.ke * omega_m
+    return dm.v0 - dm.r_batt * np.abs(i) * np.abs(thr), emf + g * (v_cmd - emf)
+
+
 def current_derivative_m(dm: DrivetrainModel, i, omega_m, thr) -> np.ndarray:
     """``di/dt = (g_eff*(V_cmd - Ke*omega_m) - R_m*i)/L`` (A/s)."""
     v_cmd, g = esc_command_m(dm, i, omega_m, thr)

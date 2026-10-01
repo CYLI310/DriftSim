@@ -347,6 +347,7 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
     if not want_info:
         return ds, None
 
+    v_batt, v_motor = drivetrain.voltages_m(dm, i_m, omega_m, thr)
     info: dict[str, np.ndarray] = dict(
         Fx=Fx, Fy=Fy, Fz=Fz, kappa=kappa, alpha=alpha, kappa_lag=kappa_lag, alpha_lag=alpha_lag,
         delta_w=delta_w, vxw=vxw, vyw=vyw, Fbx=Fbx, Fby=Fby,
@@ -354,8 +355,8 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
         mu_x=c.mu_x, mu_y=c.mu_y, w_low=w_low, vsx=vsx, vsy=vsy, v_wheel=v_wheel,
         F_mf_x=F_mf_x, F_mf_y=F_mf_y, tau=tau, T_rr=T_rr,
         ax=ax, ay=ay, beta=np.arctan2(vy, vx), v=v,
-        T_motor=T_motor, omega_m=omega_m, i_motor=i_m, thr=thr, delta_target=delta_target,
-        F_aero=np.stack([-ka * vx, -ka * vy], axis=-1), Mz=Mz,
+        T_motor=T_motor, omega_m=omega_m, i_motor=i_m, v_motor=v_motor, v_batt=v_batt, thr=thr,
+        delta_target=delta_target, F_aero=np.stack([-ka * vx, -ka * vy], axis=-1), Mz=Mz,
         dfz_long_target=vm.lt_long * ax, dfz_lat_target=vm.lt_lat * ay,
         slip_power=np.sum(heating, axis=-1),
     )
@@ -387,7 +388,8 @@ def derivatives(s: np.ndarray, u: np.ndarray, p: Params, surf: SurfaceParams,
         condition), ``w_low`` (MF weight of the low-speed blend), ``vsx, vsy`` (slip velocities),
         ``v_wheel``, ``F_mf_x, F_mf_y``, ``tau, T_rr`` (wheel torques, N m); and scalars ``ax, ay``
         (body-frame specific force incl. aero, m/s^2), ``beta`` (rad), ``v`` (m/s), ``T_motor``
-        (N m), ``omega_m`` (rad/s), ``i_motor`` (A), ``thr``, ``delta_target`` (rad), ``F_aero``
+        (N m), ``omega_m`` (rad/s), ``i_motor`` (A), ``v_motor`` (mean motor terminal voltage, V),
+        ``v_batt`` (battery terminal voltage, V), ``thr``, ``delta_target`` (rad), ``F_aero``
         (..., 2) (N), ``Mz`` (N m), ``dfz_long_target, dfz_lat_target`` (N), ``slip_power`` (W).
 
     Physics:
@@ -722,9 +724,13 @@ class VehicleBatch:
     def derivatives(self, s: np.ndarray, u: np.ndarray, want_info: bool = True):
         return derivatives_model(s, u, self.model, want_info=want_info)
 
-    def step(self, s: np.ndarray, u: np.ndarray, want_info: bool = False):
-        """One control period for all cars: s (B, NS), u (B, 2) -> (s_new, info or None)."""
-        s_new = integrator.integrate(rhs_model, np.asarray(s, dtype=np.float64), self.dt, self.n_substeps,
+    def step(self, s: np.ndarray, u: np.ndarray, want_info: bool = False, n_sub: int | None = None):
+        """One control period for all cars: s (B, NS), u (B, 2) -> (s_new, info or None).
+
+        ``n_sub`` overrides the number of integrator steps (default ``n_substeps``, one control
+        period); ``n_sub=1`` advances a single physics step of ``dt``."""
+        n = self.n_substeps if n_sub is None else int(n_sub)
+        s_new = integrator.integrate(rhs_model, np.asarray(s, dtype=np.float64), self.dt, n,
                                      str(self.params.sim.integrator), np.asarray(u, dtype=np.float64),
                                      self.model)
         if not want_info:

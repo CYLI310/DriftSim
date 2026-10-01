@@ -3,17 +3,24 @@
 A batch is written to ``<out_dir>/<timestamp>_<name>/``:
 
     manifest.json        spec, versions, signal schema (names, units, shapes), shards, timing, status
-    episodes.csv         one row per episode: sampled parameters + outcome metrics (drift time, spin, ...)
+    README.txt           how to load the data
+    all/                 every episode, spun out or not:
+      episodes.csv       one row per episode: sampled parameters + outcome metrics (drift time, spin, ...)
+      shard_0000.*       the time series (formats below)
+    not_spun/            the same layout with only the episodes whose ``spun`` is False (a shard file
+                         is skipped when all its episodes spun)
+
+Shard files:
     shard_0000.npz       arrays episode_id (n,), t (T_rec,), and one array per signal:
                          (n, T_rec) for scalars, (n, T_rec, 4) for per-wheel signals (FL, FR, RL, RR)
     shard_0000.csv       long table: episode_id, t, then one column per scalar / wheel (name_fl ...)
     shard_0000.parquet   same columns as the CSV (only when pyarrow is installed)
-    README.txt           how to load the data
 
-Every recorded row is a state at a control-step boundary t_k = k * decimation * control_dt. The
-actions on that row are the commands issued at t_k (``*_cmd``) and the ones reaching the car after
-the control latency (``*_applied``); info signals (forces, accelerations, ...) are evaluated at the
-recorded state with the applied action.
+Every recorded row is a state at t_k = k * decimation * step, where step is control_dt with
+``export.record_rate = "control"`` (default) and the physics dt with ``"physics"``. The actions on
+that row are the commands in force at t_k (``*_cmd``) and the ones reaching the car after the control
+latency (``*_applied``); they change only at control steps. Info signals (forces, accelerations,
+voltages, ...) are evaluated at the recorded state with the applied action.
 """
 from __future__ import annotations
 
@@ -21,13 +28,14 @@ import csv
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
 from ..sim import state as S
 
 WHEELS = ("fl", "fr", "rl", "rr")
+ALL_DIR, NOT_SPUN_DIR = "all", "not_spun"      # every episode / only the episodes that did not spin out
 FORMATS = ("npz", "csv", "parquet")
 
 # (name, unit, per_wheel, source, source key, description)
@@ -61,6 +69,10 @@ SIGNAL_GROUPS: list[dict] = [
     dict(key="motor_torque", label="Motor torque & speed", default=False, signals=[
         _SIG("T_motor", "N m", False, "info", "T_motor", "net motor shaft torque"),
         _SIG("omega_m", "rad/s", False, "info", "omega_m", "motor shaft speed")]),
+    dict(key="electrical", label="Motor voltage, RPM & battery", default=False, signals=[
+        _SIG("v_motor", "V", False, "info", "v_motor", "mean voltage across the motor terminals (from the ESC)"),
+        _SIG("v_batt", "V", False, "info", "v_batt", "battery terminal voltage (sags under load)"),
+        dict(_SIG("motor_rpm", "rpm", False, "info", "omega_m", "motor shaft speed"), scale=30.0 / np.pi)]),
     dict(key="tire_temps", label="Tire temperatures", default=False, signals=[
         _SIG("t_tire", "degC", True, "state", S.T_TIRE, "tire tread temperature")]),
     dict(key="load_transfer", label="Load transfer", default=False, signals=[
@@ -169,7 +181,9 @@ def _cell(v: Any) -> Any:
     return v
 
 
-def write_episodes_table(path: Path, rows: list[dict]) -> None:
+def write_episodes_table(path: Path, rows: list[dict], keep: Callable[[dict], bool] | None = None) -> None:
+    """One CSV row per episode (sorted by id); ``keep`` filters the rows, the columns always come from
+    all of ``rows`` so filtered tables share the header even when empty."""
     keys: list[str] = []
     for r in rows:
         for k in r:
@@ -181,7 +195,8 @@ def write_episodes_table(path: Path, rows: list[dict]) -> None:
         w = csv.DictWriter(f, fieldnames=keys)
         w.writeheader()
         for r in sorted(rows, key=lambda r: r["episode_id"]):
-            w.writerow({k: _cell(v) for k, v in r.items()})
+            if keep is None or keep(r):
+                w.writerow({k: _cell(v) for k, v in r.items()})
 
 
 def write_json(path: Path, obj: Any) -> None:
@@ -196,14 +211,18 @@ README = """RC drift simulator - batch export
 
 manifest.json   the full spec (reproduce with: python -m rc_drift_sim.datagen manifest.json), signal
                 schema with units, shard list, timing and status
-episodes.csv    one row per episode: sampled parameters and outcomes
+all/            every episode (spun out or not)
+  episodes.csv  one row per episode: sampled parameters and outcomes
                 (max_abs_beta_deg, drift_time_s, spun, max_speed, final_speed, distance, finite)
-shard_XXXX.*    the time series
+  shard_XXXX.*  the time series
+not_spun/       the same files with only the episodes that did not spin out (spun = False);
+                not_spun/shard_0003.* holds the non-spun episodes of all/shard_0003.*, and a shard
+                where every episode spun has no file here
 
 Load an NPZ shard in Python:
 
     import numpy as np
-    d = np.load("shard_0000.npz")
+    d = np.load("all/shard_0000.npz")      # or "not_spun/shard_0000.npz"
     d["episode_id"]        # (n,)       episode ids in this shard (rows of episodes.csv)
     d["t"]                 # (T_rec,)   time stamps in s
     d["speed"]             # (n, T_rec) one array per scalar signal

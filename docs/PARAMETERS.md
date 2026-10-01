@@ -311,6 +311,9 @@ Per-wheel signals have four columns in wheel order FL, FR, RL, RR.
 | `motor` | `i_motor` | A |  | motor current |
 | `motor_torque` | `T_motor` | N m |  | net motor shaft torque |
 | `motor_torque` | `omega_m` | rad/s |  | motor shaft speed |
+| `electrical` | `v_motor` | V |  | mean voltage across the motor terminals (from the ESC) |
+| `electrical` | `v_batt` | V |  | battery terminal voltage (sags under load) |
+| `electrical` | `motor_rpm` | rpm |  | motor shaft speed |
 | `tire_temps` | `t_tire` | degC | yes | tire tread temperature |
 | `load_transfer` | `dfz_long` | N |  | longitudinal load transfer (+ = rear loaded) |
 | `load_transfer` | `dfz_lat` | N |  | lateral load transfer (+ = right loaded) |
