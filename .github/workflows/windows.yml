@@ -1,0 +1,39 @@
+# Windows: run the test suite and build the DriftSim executable (download it from the run's
+# "Artifacts"). Runs when code changes are pushed, for version tags, and on demand
+# (Actions tab -> Windows -> Run workflow).
+name: Windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+    branches: ["**"]
+    paths: ["rc_drift_sim/**", "scripts/windows/**", "tests/**", "examples/specs/**", "pyproject.toml",
+            ".github/workflows/windows.yml"]
+
+jobs:
+  tests:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m pytest -q
+
+  executable:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build DriftSim.exe (CPU) and run its self-test
+        shell: pwsh
+        run: scripts/windows/build_exe.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DriftSim-windows-x64
+          path: dist/DriftSim.zip
+          if-no-files-found: error

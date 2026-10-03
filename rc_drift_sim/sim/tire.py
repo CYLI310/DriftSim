@@ -38,6 +38,7 @@ from typing import Any, Mapping, NamedTuple, Union
 import numpy as np
 
 from .params import SimParams, SurfaceParams, TireCondition, TireParams, VehicleParams
+from .xp import is_torch, namespace
 
 ArrayLike = Union[float, np.ndarray]
 
@@ -56,8 +57,8 @@ _R_KEYS = ("rbx1", "rbx2", "rcx1", "rby1", "rby2", "rby3", "rcy1")
 
 # ----------------------------------------------------------------------------- helpers
 def _f64(x: Any) -> np.ndarray:
-    """Float64 array view (0-d for scalars)."""
-    return np.asarray(x, dtype=np.float64)
+    """Float64 array view (0-d for scalars); torch tensors pass through unchanged (``xp`` backend)."""
+    return x if is_torch(x) else np.asarray(x, dtype=np.float64)
 
 
 def _mf_core(bx: ArrayLike, C: ArrayLike, D: ArrayLike, E: ArrayLike) -> np.ndarray:
@@ -66,7 +67,8 @@ def _mf_core(bx: ArrayLike, C: ArrayLike, D: ArrayLike, E: ArrayLike) -> np.ndar
     ``D * sin(C * atan(bx - E * (bx - atan(bx))))``. Written on the product so the similarity
     method never divides by ``B`` (which is 0 at ``Fz = 0``).
     """
-    return D * np.sin(C * np.arctan(bx - E * (bx - np.arctan(bx))))
+    xp = namespace(bx)
+    return D * xp.sin(C * xp.arctan(bx - E * (bx - xp.arctan(bx))))
 
 
 # ----------------------------------------------------------------------------- public: basics
@@ -214,6 +216,7 @@ class TireModel:
     crr: np.ndarray        # rolling-resistance coefficient per wheel
     loose_drag: np.ndarray # plowing coefficient per wheel
     has_plow: bool
+    has_pkx3: bool         # pkx3 != 0 (enables the exp term in Kx)
     inv_relax_x: float
     inv_relax_y: float
     inv_heat_capacity: float
@@ -260,7 +263,7 @@ def tire_model(tp: TireParams, surf: SurfaceParams, cond: TireCondition | None =
         inv_contam_dist=1.0 / float(tp.contamination_decay_dist),
         **{k: float(getattr(tp, k)) for k in _R_KEYS},
         crr=f("rolling_resistance"),
-        loose_drag=loose_drag, has_plow=bool(np.any(loose_drag != 0.0)),
+        loose_drag=loose_drag, has_plow=bool(np.any(loose_drag != 0.0)), has_pkx3=float(tp.pkx3) != 0.0,
         inv_relax_x=1.0 / float(tp.relax_x), inv_relax_y=1.0 / float(tp.relax_y),
         inv_heat_capacity=1.0 / float(tp.heat_capacity),
         cool_coeff=float(tp.cool_coeff), cool_speed_coeff=float(tp.cool_speed_coeff),
@@ -307,26 +310,27 @@ def coefficients(tm: TireModel, Fz: ArrayLike, T: ArrayLike | None = None,
     (when ``contam`` is given). ``mu`` is clamped >= 0 so an extrapolated negative friction
     coefficient can never flip the force. At ``Fz = 0``: ``D = K = B = 0``.
     """
-    Fz = np.maximum(_f64(Fz), 0.0)
+    xp = namespace(Fz)
+    Fz = xp.maximum(_f64(Fz), 0.0)
     dfz = (Fz - tm.fz0) * tm.inv_fz0
     mu_scale = tm.mu_scale
     if T is not None and tm.use_temp:
         z = (_f64(T) - tm.t_opt) * tm.inv_t_width
-        mu_scale = mu_scale * (1.0 - tm.temp_mu_drop * (1.0 - np.exp(-z * z)))
+        mu_scale = mu_scale * (1.0 - tm.temp_mu_drop * (1.0 - xp.exp(-z * z)))
     if contam is not None:
-        mu_scale = mu_scale * (1.0 - tm.contam_mu_drop * np.clip(_f64(contam), 0.0, 1.0))
+        mu_scale = mu_scale * (1.0 - tm.contam_mu_drop * xp.clip(_f64(contam), 0.0, 1.0))
 
-    mu_x = np.maximum((tm.pdx1 + tm.pdx2 * dfz) * mu_scale, 0.0)
+    mu_x = xp.maximum((tm.pdx1 + tm.pdx2 * dfz) * mu_scale, 0.0)
     Dx = mu_x * Fz
-    Ex = np.minimum(np.minimum(tm.pex1 + tm.pex2 * dfz, 1.0) + tm.e_shift, 1.0)
+    Ex = xp.minimum(xp.minimum(tm.pex1 + tm.pex2 * dfz, 1.0) + tm.e_shift, 1.0)
     Kx = Fz * (tm.pkx1 + tm.pkx2 * dfz) * tm.k_scale
-    if np.any(tm.pkx3 != 0.0):                           # parameter check, not a traced value
-        Kx = Kx * np.exp(tm.pkx3 * dfz)
+    if tm.has_pkx3:                                      # parameter check, not a traced value
+        Kx = Kx * xp.exp(tm.pkx3 * dfz)
     Bx = Kx / (tm.Cx * Dx + EPS_BCD)
 
-    mu_y = np.maximum((tm.pdy1 + tm.pdy2 * dfz) * mu_scale, 0.0)
+    mu_y = xp.maximum((tm.pdy1 + tm.pdy2 * dfz) * mu_scale, 0.0)
     Dy = mu_y * Fz
-    Ey = np.minimum(np.minimum(tm.pey1 + tm.pey2 * dfz, 1.0) + tm.e_shift, 1.0)
+    Ey = xp.minimum(xp.minimum(tm.pey1 + tm.pey2 * dfz, 1.0) + tm.e_shift, 1.0)
     z = Fz * tm.inv_pky2_fz0                        # sin(2 atan z) == 2z/(1+z^2), exactly
     Ky = tm.pky1_fz0 * (2.0 * z / (1.0 + z * z)) * tm.k_scale
     By = Ky / (tm.Cy * Dy + EPS_BCD)
@@ -338,7 +342,8 @@ def coefficients(tm: TireModel, Fz: ArrayLike, T: ArrayLike | None = None,
 # ----------------------------------------------------------------------------- slip -> force (array core)
 def _lateral_input(alpha: ArrayLike) -> np.ndarray:
     """Lateral MF input ``tan(alpha)`` with |alpha| clamped just below pi/2 (dimensionless)."""
-    return np.tan(np.clip(_f64(alpha), -ALPHA_MAX, ALPHA_MAX))
+    xp = namespace(alpha)
+    return xp.tan(xp.clip(_f64(alpha), -ALPHA_MAX, ALPHA_MAX))
 
 
 def _pure(c: Coef, kappa: ArrayLike, alpha: ArrayLike) -> tuple[np.ndarray, np.ndarray]:
@@ -357,8 +362,9 @@ def _similarity(c: Coef, kappa: ArrayLike, alpha: ArrayLike) -> tuple[np.ndarray
     """
     sx = c.Bx * c.Cx * (_f64(kappa) * c.inv_slip_scale)
     sy = c.By * c.Cy * (_lateral_input(alpha) * c.inv_slip_scale)
-    rho = np.sqrt(sx * sx + sy * sy)
-    inv_rho = 1.0 / np.maximum(rho, RHO_EPS)
+    xp = namespace(sx, sy)
+    rho = xp.sqrt(sx * sx + sy * sy)
+    inv_rho = 1.0 / xp.maximum(rho, RHO_EPS)
     Fx = _mf_core(rho / c.Cx, c.Cx, c.Dx, c.Ex) * (sx * inv_rho)
     Fy = -_mf_core(rho / c.Cy, c.Cy, c.Dy, c.Ey) * (sy * inv_rho)
     return Fx, Fy
@@ -370,22 +376,24 @@ def _mf_weighting(c: Coef, kappa: ArrayLike, alpha: ArrayLike) -> tuple[np.ndarr
     k = _f64(kappa) * c.inv_slip_scale
     a = _f64(alpha) * c.inv_slip_scale
     Fx0, Fy0 = _pure(c, kappa, alpha)
-    Gxa = np.cos(c.rcx1 * np.arctan(c.rbx1 * np.cos(np.arctan(c.rbx2 * k)) * a))
-    Gyk = np.cos(c.rcy1 * np.arctan(c.rby1 * np.cos(np.arctan(c.rby2 * (a - c.rby3))) * k))
+    xp = namespace(Fx0)
+    Gxa = xp.cos(c.rcx1 * xp.arctan(c.rbx1 * xp.cos(xp.arctan(c.rbx2 * k)) * a))
+    Gyk = xp.cos(c.rcy1 * xp.arctan(c.rby1 * xp.cos(xp.arctan(c.rby2 * (a - c.rby3))) * k))
     Fx = Gxa * Fx0
     Fy = Gyk * Fy0
-    nx = Fx / np.maximum(c.Dx, DIV_EPS)
-    ny = Fy / np.maximum(c.Dy, DIV_EPS)
-    scale = 1.0 / np.maximum(np.hypot(nx, ny), 1.0)
+    nx = Fx / xp.maximum(c.Dx, DIV_EPS)
+    ny = Fy / xp.maximum(c.Dy, DIV_EPS)
+    scale = 1.0 / xp.maximum(xp.hypot(nx, ny), 1.0)
     return Fx * scale, Fy * scale
 
 
 def _ellipse(c: Coef, kappa: ArrayLike, alpha: ArrayLike) -> tuple[np.ndarray, np.ndarray]:
     """racer.nl simple method: ``Fx = Fx0``, ``Fy = Fy0 * sqrt(max(0, 1 - (Fx/Dx)^2))``."""
     Fx0, Fy0 = _pure(c, kappa, alpha)
-    nx = Fx0 / np.maximum(c.Dx, DIV_EPS)
-    Fy = Fy0 * np.sqrt(np.maximum(0.0, 1.0 - nx * nx))
-    return Fx0 * np.ones_like(Fy), Fy
+    xp = namespace(Fx0)
+    nx = Fx0 / xp.maximum(c.Dx, DIV_EPS)
+    Fy = Fy0 * xp.sqrt(xp.maximum(1.0 - nx * nx, 0.0))
+    return Fx0 * xp.ones_like(Fy), Fy
 
 
 _COMBINED = {"similarity": _similarity, "mf_weighting": _mf_weighting, "ellipse": _ellipse}
@@ -409,8 +417,9 @@ def plowing_force(loose_drag: ArrayLike, vyw: ArrayLike, Fz: ArrayLike) -> np.nd
     Linear (viscous-like) for small slides, saturating at ``PLOW_CAP * loose_drag * Fz``.
     Zero on paved surfaces (``loose_drag = 0``) and at zero lateral velocity.
     """
+    xp = namespace(vyw, Fz)
     q = _f64(vyw) * (1.0 / PLOW_V_REF)
-    return -_f64(loose_drag) * np.maximum(_f64(Fz), 0.0) * q / np.sqrt(1.0 + (q * (1.0 / PLOW_CAP)) ** 2)
+    return -_f64(loose_drag) * xp.maximum(_f64(Fz), 0.0) * q / xp.sqrt(1.0 + (q * (1.0 / PLOW_CAP)) ** 2)
 
 
 class LowSpeed(NamedTuple):
@@ -434,15 +443,16 @@ def forces_model(tm: TireModel, ls: LowSpeed, kappa_lag: ArrayLike, alpha_lag: A
     ``(Fx, Fy, c, w, vsx, vsy, v_wheel, F_mf_x, F_mf_y, F_low_x, F_low_y)``; see
     :func:`tire_forces` for the model.
     """
+    xp = namespace(Fz)
     c = coefficients(tm, Fz, T, contam)
     F_mf_x, F_mf_y = _combined(tm.mode, c, kappa_lag, alpha_lag)
     vsx = omega_R - vxw
     vsy = -vyw
-    inv_den = 1.0 / np.sqrt(vsx * vsx + vsy * vsy + ls.v_c2)
+    inv_den = 1.0 / xp.sqrt(vsx * vsx + vsy * vsy + ls.v_c2)
     F_low_x = c.Dx * vsx * inv_den
     F_low_y = c.Dy * vsy * inv_den
-    v_wheel = np.sqrt(vxw * vxw + vyw * vyw)
-    t = np.clip((v_wheel - ls.v_low_start) * ls.inv_span, 0.0, 1.0)
+    v_wheel = xp.sqrt(vxw * vxw + vyw * vyw)
+    t = xp.clip((v_wheel - ls.v_low_start) * ls.inv_span, 0.0, 1.0)
     w = t * t * (3.0 - 2.0 * t)
     Fx = F_low_x + w * (F_mf_x - F_low_x)
     Fy = F_low_y + w * (F_mf_y - F_low_y)

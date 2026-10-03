@@ -59,7 +59,7 @@ A spec is a JSON object. Everything is optional except what you want to change:
   "params":   { "vehicle.mass": {"dist": "uniform", "low": 1.4, "high": 1.8} },
   "maneuver": { "type": "random", "params": {} },
   "export":   { "formats": ["npz"], "signals": ["pose", "velocity", "derived", "actions"] },
-  "run":      { "workers": 0 }
+  "run":      { "workers": 0, "device": "cpu" }
 }
 ```
 
@@ -72,7 +72,10 @@ A spec is a JSON object. Everything is optional except what you want to change:
 | `params` | variables to fix, randomize or sweep ([below](#choosing-and-varying-variables)) | none: YAML defaults |
 | `maneuver` | driver-input generator and its parameters ([below](#driver-inputs-maneuvers)) | `drift_schedule` |
 | `export` | formats, signals, decimation, precision, shard size, output folder ([below](#export-options)) | NPZ, default signals |
-| `run.workers` | worker processes; `0` = one per CPU core minus one | `0` |
+| `run.workers` | worker processes; `0` = one per CPU core minus one (CPU only) | `0` |
+| `run.device` | `cpu` (NumPy float64 reference), `mps` (Apple GPU), `cuda` (NVIDIA GPU), `auto` (best GPU, else CPU); see [GPU acceleration](#gpu-acceleration) | `cpu` |
+| `run.precision` | GPU arithmetic: `float32` or `float64` (`float64` not on Apple GPUs) | `float32` |
+| `run.compile` | fuse the GPU kernels with `torch.compile` (NVIDIA; ignored on Apple GPUs) | `false` |
 
 `validate_spec(spec)` returns the normalized spec, a list of errors and a list of warnings; the CLI
 and `run_batch` refuse to start on errors (unknown variable names, low > high, a mass that could be
@@ -244,7 +247,33 @@ backend, 1 kHz RK4 physics, 50 Hz control):
 | 5,000 episodes x 4 s, same | 19.6 s | 255 episodes/s, 51,000 control steps/s |
 
 Tips: keep structural settings fixed; use `float32` and only the signal groups you need; use
-`decimation` when 50 Hz is more than you need. The JAX port (Milestone 3) is the next large speed step.
+`decimation` when 50 Hz is more than you need; for large batches use a GPU (below).
+
+## GPU acceleration
+
+With PyTorch installed (`pip install -e ".[gpu]"`; on an NVIDIA machine first install the CUDA
+build that matches your driver from pytorch.org), `"run": {"device": "mps"}` (Apple Silicon) or
+`"cuda"` (NVIDIA) simulates thousands of episodes at once on the GPU. The GUI has the same choice
+under Export, Output options, Compute device. The same physics code runs on both backends:
+`rc_drift_sim/sim/xp.py` maps the NumPy calls of the core to PyTorch.
+
+What to expect:
+
+* **Speed.** Apple M4 (10-core GPU), 20,000 episodes x 5 s of the drift dataset: 93 s on the CPU
+  (9 NumPy workers, 54k control steps/s) vs 56 s on MPS (90k control steps/s, 1.7x). The GPU levels
+  off at about 96k control steps/s from 16,000 cars; with a few hundred episodes the CPU is faster.
+  NVIDIA GPUs have far more memory bandwidth and can also fuse the kernels (`run.compile`), so
+  expect a much larger gain there; `python scripts/bench_devices.py` measures any machine.
+* **Precision.** Apple GPUs only do float32, and float32 is the GPU default. Open-loop drifts are
+  unstable, so a float32 episode drifts away from its float64 twin after a second or two; outcome
+  statistics agree (both runs above spun 90.7 % of the time), single episodes do not. The CPU
+  stays the bit-reproducible reference; on CUDA `"precision": "float64"` matches it to rounding.
+* **Fusion.** `torch.compile` is not used on Apple GPUs: Metal allows 31 buffers per kernel and
+  the fused tire kernels of this model need more, so MPS runs in eager mode. On CUDA it is opt-in
+  and falls back to eager mode (with a warning) if compilation fails.
+
+Episodes are simulated in GPU batches of up to 65,536 (and about 1 GB of recorded signals), then
+written as the usual shards; `manifest.json` records the device and precision.
 
 ## How it works
 

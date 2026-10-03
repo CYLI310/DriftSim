@@ -8,6 +8,7 @@ dist/
 
 # virtual environments
 .venv/
+.venv-build/
 venv/
 
 # OS and editor files

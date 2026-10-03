@@ -18,7 +18,7 @@ A spec is a plain dict (JSON-serializable)::
       "export": {"formats": ["npz"], "signals": ["pose", "velocity", "derived", "actions"],
                  "record_rate": "control", "decimation": 1, "float32": true, "compress": false,
                  "shard_episodes": 256, "out_dir": "exports"},
-      "run": {"workers": 0}
+      "run": {"workers": 0, "device": "cpu", "precision": "float32", "compile": false}
     }
 
 Distributions (``dist``):
@@ -40,6 +40,7 @@ import copy
 import math
 from typing import Any
 
+from ..sim.xp import DEVICES, PRECISIONS     # run.device: "cpu" = NumPy float64 reference, else PyTorch
 from .catalog import build_catalog, field_index
 from .inputs import MANEUVERS
 
@@ -63,7 +64,7 @@ def default_spec() -> dict:
         "export": {"formats": ["npz"], "signals": list(DEFAULT_SIGNALS), "record_rate": "control",
                    "decimation": 1, "float32": True, "compress": False, "shard_episodes": 256,
                    "out_dir": "exports"},
-        "run": {"workers": 0},
+        "run": {"workers": 0, "device": "cpu", "precision": "float32", "compile": False},
     }
 
 
@@ -292,6 +293,21 @@ def validate_spec(spec: dict) -> tuple[dict, list[str], list[str]]:
     run.update(spec.get("run", {}) or {})
     if not isinstance(run.get("workers"), int) or run["workers"] < 0:
         errors.append("run.workers must be an integer >= 0 (0 = automatic)")
+    if run.get("device") not in DEVICES:
+        errors.append(f"run.device must be one of {list(DEVICES)}")
+    elif run["device"] != "cpu":
+        from ..sim.xp import resolve_device
+        try:
+            dev = resolve_device(run["device"])
+        except ValueError as exc:
+            errors.append(f"run.device: {exc}")
+        else:
+            if dev == "mps" and run.get("precision") == "float64":
+                errors.append("run.precision: Apple GPUs (mps) only support float32")
+    if run.get("precision") not in PRECISIONS:
+        errors.append(f"run.precision must be one of {list(PRECISIONS)}")
+    if not isinstance(run.get("compile"), bool):
+        errors.append("run.compile must be true or false")
     out["run"] = run
 
     if errors:
@@ -315,6 +331,11 @@ def validate_spec(spec: dict) -> tuple[dict, list[str], list[str]]:
     if grid > out["episodes"]:
         warnings.append(f"the sweep grid has {grid} points but only {out['episodes']} episodes: part of the "
                         f"grid is not covered")
+    if out["run"]["compile"] and out["run"]["device"] in ("mps", "auto"):
+        from ..sim.xp import resolve_device
+        if resolve_device(out["run"]["device"]) == "mps":
+            warnings.append("run.compile is ignored on Apple GPUs (mps): Metal cannot build the fused kernels "
+                            "of this model, so it runs in eager PyTorch")
     varying_struct = [k for k, d in norm_params.items() if idx[k].get("structural") and d["dist"] != "fixed"]
     if varying_struct:
         warnings.append(f"structural settings vary ({', '.join(varying_struct)}): episodes are split into "

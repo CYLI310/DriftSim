@@ -49,6 +49,7 @@ import numpy as np
 
 from .. import __version__
 from ..datagen import build_catalog, default_spec, estimate, preview, run_batch, validate_spec
+from ..sim.xp import available_devices
 from ..datagen.runner import SpecError, default_out_root
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -368,6 +369,7 @@ class Handler(BaseHTTPRequestHandler):
         cat["signals"] = [dict(g, signals=[{k: v for k, v in s.items() if k not in ("src", "source")}
                                            for s in g["signals"]]) for g in cat["signals"]]
         self._json(dict(catalog=cat, default_spec=default_spec(), cpu_count=os.cpu_count() or 1,
+                        devices=available_devices(),
                         rate=self.app.jobs.rate, version=__version__, export_root=str(self.app.root)))
 
     def examples(self) -> None:

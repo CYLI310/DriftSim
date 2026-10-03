@@ -541,6 +541,21 @@
     const workers = h("select", { onchange: () => { S.spec.run.workers = Number(workers.value); changed(); } },
       h("option", { value: 0, selected: S.spec.run.workers === 0 }, `Automatic (${Math.max(1, S.cpu - 1)})`),
       Array.from({ length: S.cpu }, (_, i) => h("option", { value: i + 1, selected: S.spec.run.workers === i + 1 }, String(i + 1))));
+    const run = S.spec.run, devs = S.devices || { cpu: true }, dev = run.device || "cpu";
+    const setRun = (k, v) => { run[k] = v; changed(); renderContent(); };
+    const devSel = h("select", { "aria-label": "Compute device", onchange: () => {
+        if (devSel.value === "mps") run.precision = "float32";
+        setRun("device", devSel.value); } },
+      h("option", { value: "cpu", selected: dev === "cpu" }, "CPU: NumPy float64, all cores"),
+      h("option", { value: "mps", selected: dev === "mps", disabled: !devs.mps }, `Apple GPU (MPS), float32${devs.mps ? "" : " (not available)"}`),
+      h("option", { value: "cuda", selected: dev === "cuda", disabled: !devs.cuda }, `NVIDIA GPU (CUDA)${devs.cuda ? "" : " (not available)"}`),
+      h("option", { value: "auto", selected: dev === "auto" }, `Best available (${devs.cuda ? "CUDA" : devs.mps ? "MPS" : "CPU"})`));
+    const gpuOn = dev !== "cpu" && (dev !== "auto" || devs.cuda || devs.mps);
+    const isMps = dev === "mps" || (dev === "auto" && !devs.cuda && devs.mps);
+    const precSel = h("select", { "aria-label": "Precision", onchange: () => setRun("precision", precSel.value) },
+      h("option", { value: "float32", selected: run.precision !== "float64" }, "float32 (fast)"),
+      h("option", { value: "float64", selected: run.precision === "float64", disabled: isMps }, `float64${isMps ? " (not on Apple GPUs)" : ""}`));
+    const comp = h("input", { type: "checkbox", checked: !!run.compile, onchange: () => setRun("compile", comp.checked) });
     const cdt = 0.02, pdt = 0.001, phys = e.record_rate === "physics";
     const recRate = h("select", { "aria-label": "Record rate", onchange: () => { setE("record_rate", recRate.value); renderContent(); } },
       h("option", { value: "control", selected: !phys }, `Every control step (${r6(1 / cdt)} Hz)`),
@@ -560,7 +575,14 @@
           h("label", {}, "Episodes per file"), h("div", { class: "ctl" }, numInput(e.shard_episodes, (v) => setE("shard_episodes", Math.max(1, Math.round(v))), { width: "90px" }),
             h("span", { class: "lbl" }, "maximum; smaller shards are used to keep all cores busy")),
           h("label", {}, "Output folder"), h("div", { class: "ctl" }, out, h("span", { class: "lbl" }, `relative to the repository · now ${S.root}`)),
-          h("label", {}, "Worker processes"), workers)));
+          h("label", {}, "Worker processes"), h("div", { class: "ctl" }, workers, gpuOn ? h("span", { class: "lbl" }, "not used on a GPU") : null),
+          h("label", {}, "Compute device"), h("div", { class: "ctl" }, devSel,
+            h("span", { class: "lbl" }, gpuOn ? "pays off from a few thousand episodes; float32 results match the CPU statistically, not episode by episode"
+              : "the float64 reference; every episode is exactly reproducible")),
+          gpuOn ? h("label", {}, "Precision") : null, gpuOn ? h("div", { class: "ctl" }, precSel) : null,
+          gpuOn && !isMps ? h("label", {}, "Fuse kernels") : null,
+          gpuOn && !isMps ? h("div", { class: "ctl" }, h("label", { class: "switch" }, comp, h("span")),
+            h("span", { class: "lbl" }, "torch.compile on NVIDIA GPUs: slower start, faster after")) : null)));
   }
 
   function renderSearch() {
@@ -971,6 +993,7 @@
     try {
       const r = await api("GET", "/api/catalog");
       S.cat = r.catalog; S.defaultSpec = r.default_spec; S.cpu = r.cpu_count; S.rate = r.rate; S.root = r.export_root;
+      S.devices = r.devices || { cpu: true };
       for (const g of S.cat.groups) { S.groups[g.id] = g; for (const f of g.fields) S.fields[f.key] = { ...f, group: g.id }; }
       setOnline(true);
     } catch (e) {

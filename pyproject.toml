@@ -18,10 +18,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pyflakes", "pygame"]
+# GPU-accelerated batch data generation (Apple MPS or NVIDIA CUDA); for CUDA install the wheel
+# matching your driver from https://pytorch.org first
+gpu = ["torch>=2.4"]
 
 [project.scripts]
 driftsim-datagen = "rc_drift_sim.datagen.__main__:main"
 driftsim-gui = "rc_drift_sim.app.__main__:main"
+driftsim-train = "rc_drift_sim.rl.ppo:main"
 
 [tool.setuptools.packages.find]
 include = ["rc_drift_sim*"]

@@ -23,6 +23,12 @@ policy that drifts on many surfaces and tire conditions and then runs on a real 
   latency and so on, step together in one vectorized batch.
 - **Dataset export.** Describe what to vary in a JSON spec and get NPZ / CSV / Parquet files with a
   manifest and a per-episode summary, generated in parallel on all CPU cores.
+- **Reinforcement learning.** Gymnasium environments for holding a drift and for drifting round a
+  circle: thousands of cars in one vectorized simulation (CPU or GPU), sensor-like observations
+  with noise, per-episode domain randomization in the batch-spec language, a model-based reference
+  controller and a compact PPO trainer.
+- **GPU acceleration.** Generate data on an Apple Silicon (MPS) or NVIDIA (CUDA) GPU with PyTorch;
+  the NumPy CPU path stays the bit-reproducible float64 reference.
 - **Web GUI.** Change any variable, preview a few episodes, run large batches in the background and
   download the results, all from a local page in your browser.
 - **Analysis tools.** Steady-state (trim) solver, stability analysis, an LQR drift controller,
@@ -38,9 +44,9 @@ policy that drifts on many surfaces and tire conditions and then runs on a real 
 | Batch data generation (command line and Python) | **done** |
 | Web GUI for batch export | **done** |
 | 2. Surface maps and roughness (tire-condition model already done) | next |
-| 3. JAX port for GPU-scale speed | planned |
-| 4. Gymnasium environment and drift rewards | planned |
-| 5. PPO training, first learned drift | planned |
+| 3. GPU acceleration (PyTorch on Apple MPS / NVIDIA CUDA) for data generation | **done** (RL env on GPU comes with M4) |
+| 4. Gymnasium environment and drift rewards | **done** ([docs/RL.md](docs/RL.md)) |
+| 5. PPO training, first learned drift | next (a working PPO trainer is included) |
 | 6. Domain randomization, realistic sensors, curriculum | planned (per-car batching is in place) |
 | 7. Mixed-surface tasks and evaluation suite | planned |
 | 8. System identification from real-car logs, ONNX export | planned |
@@ -55,6 +61,7 @@ cd DriftSim
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+pip install -e ".[gpu]"     # optional: PyTorch for GPU-accelerated data generation (Apple MPS / NVIDIA CUDA)
 ```
 
 ## Quick start
@@ -115,6 +122,34 @@ to run the server in a Terminal window; closing the window stops it.
 From a shell, `scripts/driftsim-gui.sh` does the same: `--background`, `--stop`, `--status`.
 Background logs go to `~/Library/Logs/DriftSim/server.log`. Stopping cancels a run in progress
 and keeps the files already written.
+
+**Windows.** `DriftSim.exe` is a self-contained build of the GUI (no Python needed): run it, the page
+opens in the browser, datasets go to `Documents\DriftSim\exports`, and closing its window stops it.
+Get it from the "Windows" GitHub Actions workflow (Actions tab, Run workflow, then the
+`DriftSim-windows-x64` artifact), or build it on a Windows PC with Python 3.11:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\build_exe.ps1            # dist\DriftSim\DriftSim.exe
+powershell -ExecutionPolicy Bypass -File scripts\windows\build_exe.ps1 -WithTorch # with PyTorch for GPUs
+```
+
+To run from the source checkout instead, double-click `scripts\windows\Start DriftSim.bat`.
+
+## Reinforcement learning
+
+```python
+import gymnasium as gym
+import rc_drift_sim.rl as rl
+
+env = gym.make("DriftSim/DriftHold-v0")                                  # one car
+envs = rl.DriftVectorEnv(1024, rl.EnvConfig(task="track", randomize={...}))   # 1024 cars at once
+```
+
+```bash
+driftsim-train --task hold --envs 1024 --steps 20000000 --out runs/hold        # PPO
+```
+
+Tasks, observations, rewards, randomization and reference scores: [docs/RL.md](docs/RL.md).
 
 ## Generate datasets from the command line
 
@@ -180,13 +215,16 @@ DriftSim/
 │   ├── control/           open-loop maneuvers and the LQR drift controller
 │   ├── datagen/           batch dataset generation (driftsim-datagen)
 │   ├── app/               web GUI (driftsim-gui): local server and the page in static/
+│   ├── rl/                Gymnasium environments, rewards, reference controllers, PPO (driftsim-train)
 │   └── viz/               top-down renderer, animations, time-series plots
 ├── examples/              quickstart.py, batch_export.py, specs/*.json ready-made datasets
 ├── scripts/               driftsim-gui.sh (start / stop the GUI), mac/ (DriftSim.app launcher),
+│                          windows/ (DriftSim.exe build, Start DriftSim.bat), bench_devices.py,
 │                          make_figures.py, tune_drift.py, make_param_reference.py
 ├── tests/                 pytest suite
 └── docs/
     ├── DATA_GENERATION.md how to make datasets
+    ├── RL.md              the reinforcement-learning environments and trainer
     ├── PARAMETERS.md      every variable with default, unit and description (generated)
     ├── DESIGN.md          the physics model: conventions, equations, module contracts, findings
     └── images/            figures used here
@@ -214,5 +252,6 @@ python scripts/make_param_reference.py --check
 ## Documentation
 
 - [docs/DATA_GENERATION.md](docs/DATA_GENERATION.md): generating datasets
+- [docs/RL.md](docs/RL.md): reinforcement-learning environments, rewards and the PPO trainer
 - [docs/PARAMETERS.md](docs/PARAMETERS.md): every variable, maneuver and exportable signal
 - [docs/DESIGN.md](docs/DESIGN.md): the physics model in depth

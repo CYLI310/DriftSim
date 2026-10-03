@@ -51,6 +51,7 @@ from .params import Params, SurfaceParams, TireCondition, default_params
 from .state import (ALPHA_LAG, CONTAM, DELTA, DFZ_LAT, DFZ_LONG, I_MOTOR, KAPPA_LAG, NS, OMEGA,
                     R, T_TIRE, VX, VY, X, Y, YAW)
 from .surface import uniform_surface
+from .xp import namespace
 
 # ``derivatives`` assembles ``ds`` by concatenation in the canonical order; make sure the
 # layout in state.py is the one this module was written against.
@@ -98,6 +99,9 @@ class VehicleModel:
     v_eps: float
     inv_v_rr: float
     t_amb: float
+    front: np.ndarray         # (4,) 1 on the front (steered) wheels, 0 on the rear
+    rear: np.ndarray          # (4,) 1 - front
+    parallel_steer: bool      # ackermann == 0 (configuration flag: cheaper steer trig)
 
 
 def compile_model(params: Params, surf: SurfaceParams | None = None,
@@ -132,6 +136,7 @@ def compile_model(params: Params, surf: SurfaceParams | None = None,
         L=float(vp.wheelbase), half_track=0.5 * float(vp.track_width),
         ackermann=float(vp.ackermann),
         v_eps=float(sim.v_eps), inv_v_rr=1.0 / float(sim.v_rr), t_amb=float(sim.ambient_temp),
+        front=_FRONT.copy(), rear=_REAR.copy(), parallel_steer=float(vp.ackermann) == 0.0,
     )
 
 
@@ -146,6 +151,8 @@ _WHEEL_FLOATS = {  # float fields used against per-wheel arrays -> stacked to (B
 _SHARED = {  # structural fields that must be identical across the batch
     "TireModel": {"mode", "use_temp"}, "DrivetrainModel": {"front_driven", "reverse_enabled", "driven"},
 }
+_FLAG_ANY = {"has_plow", "has_pkx3", "has_drag_brake"}   # a term is evaluated if any car needs it
+_FLAG_ALL = {"parallel_steer"}                           # a shortcut is taken only if every car allows it
 STRUCTURAL = ("tire.combined_mode", "drivetrain.layout", "drivetrain.reverse_enabled",
               "sim.dt", "sim.control_dt", "sim.integrator")
 
@@ -164,8 +171,11 @@ def _stack_fields(objs: list, kind: str, skip: tuple = ()) -> Any:
         if name in skip:
             out[name] = v0
         elif name in shared or isinstance(v0, (str, bool)):
-            if name == "has_plow":
+            if name in _FLAG_ANY:
                 out[name] = any(vals)
+                continue
+            if name in _FLAG_ALL:
+                out[name] = all(vals)
                 continue
             same = all(np.array_equal(v, v0) if isinstance(v0, np.ndarray) else v == v0 for v in vals)
             if not same:
@@ -242,8 +252,10 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
     Returns ``(ds, info)`` with ds (..., NS) in SI units per second and info None unless
     ``want_info``. See :func:`derivatives` for the info keys and the physics.
     """
-    s = np.asarray(s, dtype=np.float64)
-    u = np.asarray(u, dtype=np.float64)
+    xp = namespace(s)
+    if xp is np:
+        s = np.asarray(s, dtype=np.float64)
+        u = np.asarray(u, dtype=np.float64)
     tm, dm, am = vm.tm, vm.dm, vm.am
     steer_cmd, thr_cmd = u[..., 0], u[..., 1]
     psi = s[..., YAW]
@@ -259,17 +271,17 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
 
     # --- per-wheel steer angles (rear wheels do not steer: cos = 1, sin = 0 there, so the trig
     #     is only evaluated for the front axle)
-    if np.all(vm.ackermann == 0.0):                       # parameter check (parallel steer)
-        delta_w = delta[..., None] * _FRONT
-        cd = np.cos(delta)[..., None] * _FRONT + _REAR
-        sd = np.sin(delta)[..., None] * _FRONT
+    if vm.parallel_steer:                                 # parameter check (parallel steer)
+        delta_w = delta[..., None] * vm.front
+        cd = xp.cos(delta)[..., None] * vm.front + vm.rear
+        sd = xp.sin(delta)[..., None] * vm.front
     else:
         d_fl, d_fr = actuators.ackermann_angles_m(vm.L, vm.half_track, vm.ackermann, delta)
-        d_front = np.stack([d_fl, d_fr], axis=-1)
-        pad = np.zeros(d_front.shape, dtype=np.float64)
-        delta_w = np.concatenate([d_front, pad], axis=-1)
-        cd = np.concatenate([np.cos(d_front), pad + 1.0], axis=-1)
-        sd = np.concatenate([np.sin(d_front), pad], axis=-1)
+        d_front = xp.stack([d_fl, d_fr], axis=-1)
+        pad = xp.zeros_like(d_front)
+        delta_w = xp.concatenate([d_front, pad], axis=-1)
+        cd = xp.concatenate([xp.cos(d_front), pad + 1.0], axis=-1)
+        sd = xp.concatenate([xp.sin(d_front), pad], axis=-1)
 
     # --- contact velocities: body frame, then rotated by -delta_i into the wheel frame
     vcx = vx_ - r_ * vm.yi
@@ -279,14 +291,14 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
 
     # --- instantaneous slips and relaxation ODEs
     omega_R = omega * vm.Rw
-    v_reg = np.maximum(np.abs(vxw), vm.v_eps)
+    v_reg = xp.maximum(xp.abs(vxw), vm.v_eps)
     kappa = (omega_R - vxw) / v_reg
-    alpha = np.arctan2(vyw, v_reg)
+    alpha = xp.arctan2(vyw, v_reg)
     dkappa_lag = (v_reg * tm.inv_relax_x) * (kappa - kappa_lag)
     dalpha_lag = (v_reg * tm.inv_relax_y) * (alpha - alpha_lag)
 
     # --- wheel loads from the lag STATES
-    Fz = np.maximum(vm.fz_static + vm.long_pat * dfz_long[..., None]
+    Fz = xp.maximum(vm.fz_static + vm.long_pat * dfz_long[..., None]
                     + vm.lat_pat * dfz_lat[..., None], 0.0)
 
     # --- tire friction forces (wheel frame) on the LAGGED slips
@@ -303,15 +315,15 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
     # --- body-frame forces, aero, accelerations
     Fbx = Fx * cd - Fy_tot * sd
     Fby = Fx * sd + Fy_tot * cd
-    v = np.sqrt(vx * vx + vy * vy)
+    v = xp.sqrt(vx * vx + vy * vy)
     ka = vm.aero_k * v
-    ax = (np.sum(Fbx, axis=-1) - ka * vx) * vm.inv_m
-    ay = (np.sum(Fby, axis=-1) - ka * vy) * vm.inv_m
-    Mz = np.sum(vm.xi * Fby - vm.yi * Fbx, axis=-1)
-    cpsi, spsi = np.cos(psi), np.sin(psi)
+    ax = (xp.sum(Fbx, axis=-1) - ka * vx) * vm.inv_m
+    ay = (xp.sum(Fby, axis=-1) - ka * vy) * vm.inv_m
+    Mz = xp.sum(vm.xi * Fby - vm.yi * Fbx, axis=-1)
+    cpsi, spsi = xp.cos(psi), xp.sin(psi)
 
     # --- wheel torques and drivetrain
-    T_rr = tm.crr * Fz * vm.Rw * np.tanh(omega_R * vm.inv_v_rr)
+    T_rr = tm.crr * Fz * vm.Rw * xp.tanh(omega_R * vm.inv_v_rr)
     tau = vm.Rw * Fx + T_rr
     thr = actuators.throttle_command_m(am, thr_cmd)
     omega_m = drivetrain.shaft_speed_m(dm, omega)
@@ -328,18 +340,18 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
     ddfz_lat = (vm.lt_lat * ay - dfz_lat) * vm.inv_tau_lt
 
     # --- tire thermal state and contamination wear-off
-    heating = np.abs(Fx * vsx) + np.abs(Fy * vsy)
+    heating = xp.abs(Fx * vsx) + xp.abs(Fy * vsy)
     cooling = (tm.cool_coeff + tm.cool_speed_coeff * v_wheel) * (T_tire - vm.t_amb)
     dT = (heating - cooling) * tm.inv_heat_capacity
     dcontam = -(v_wheel * tm.inv_contam_dist) * contam
 
-    ds = np.concatenate([
-        np.stack([vx * cpsi - vy * spsi, vx * spsi + vy * cpsi, r,
+    ds = xp.concatenate([
+        xp.stack([vx * cpsi - vy * spsi, vx * spsi + vy * cpsi, r,
                   ax + vy * r, ay - vx * r, Mz * vm.inv_iz], axis=-1),  # X Y YAW VX VY R
         domega,                                                          # OMEGA (4)
-        np.stack([np.broadcast_to(ddelta, di.shape), di], axis=-1),      # DELTA I_MOTOR
+        xp.stack([xp.broadcast_to(ddelta, di.shape), di], axis=-1),      # DELTA I_MOTOR
         dT,                                                              # T_TIRE (4)
-        np.stack([ddfz_long, ddfz_lat], axis=-1),                        # DFZ_LONG DFZ_LAT
+        xp.stack([ddfz_long, ddfz_lat], axis=-1),                        # DFZ_LONG DFZ_LAT
         dkappa_lag,                                                      # KAPPA_LAG (4)
         dalpha_lag,                                                      # ALPHA_LAG (4)
         dcontam,                                                         # CONTAM (4)
@@ -351,14 +363,14 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
     info: dict[str, np.ndarray] = dict(
         Fx=Fx, Fy=Fy, Fz=Fz, kappa=kappa, alpha=alpha, kappa_lag=kappa_lag, alpha_lag=alpha_lag,
         delta_w=delta_w, vxw=vxw, vyw=vyw, Fbx=Fbx, Fby=Fby,
-        F_plow=(np.zeros_like(Fy) if F_plow is None else F_plow),
+        F_plow=(xp.zeros_like(Fy) if F_plow is None else F_plow),
         mu_x=c.mu_x, mu_y=c.mu_y, w_low=w_low, vsx=vsx, vsy=vsy, v_wheel=v_wheel,
         F_mf_x=F_mf_x, F_mf_y=F_mf_y, tau=tau, T_rr=T_rr,
-        ax=ax, ay=ay, beta=np.arctan2(vy, vx), v=v,
+        ax=ax, ay=ay, beta=xp.arctan2(vy, vx), v=v,
         T_motor=T_motor, omega_m=omega_m, i_motor=i_m, v_motor=v_motor, v_batt=v_batt, thr=thr,
-        delta_target=delta_target, F_aero=np.stack([-ka * vx, -ka * vy], axis=-1), Mz=Mz,
+        delta_target=delta_target, F_aero=xp.stack([-ka * vx, -ka * vy], axis=-1), Mz=Mz,
         dfz_long_target=vm.lt_long * ax, dfz_lat_target=vm.lt_lat * ay,
-        slip_power=np.sum(heating, axis=-1),
+        slip_power=xp.sum(heating, axis=-1),
     )
     return ds, info
 
