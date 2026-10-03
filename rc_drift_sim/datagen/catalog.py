@@ -217,7 +217,11 @@ INIT_FIELDS = [
 def _field_comments(cls) -> dict[str, str]:
     """``name: type = default   # comment`` -> {name: comment} from the dataclass source."""
     out: dict[str, str] = {}
-    for line in inspect.getsource(cls).splitlines():
+    try:
+        src = inspect.getsource(cls)
+    except (OSError, TypeError):          # bytecode-only install (e.g. a frozen app): no descriptions
+        return out
+    for line in src.splitlines():
         m = re.match(r"^\s{4}(\w+):\s*[^=#]+=\s*[^#]*?(?:#\s*(.*))?$", line)
         if m and not m.group(1).isupper():
             out[m.group(1)] = (m.group(2) or "").strip()

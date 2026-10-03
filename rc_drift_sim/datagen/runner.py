@@ -29,6 +29,7 @@ import os
 import subprocess
 import time
 import traceback
+import warnings
 import zlib
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
@@ -39,7 +40,9 @@ from typing import Any, Callable
 import numpy as np
 
 from .. import __version__
-from ..sim.vehicle import VehicleBatch, derivatives_model
+from ..sim import integrator
+from ..sim.vehicle import VehicleBatch, derivatives_model, rhs_model
+from ..sim.xp import TORCH, resolve_device, to_device, to_numpy, torch_dtype
 from . import export as X
 from . import inputs
 from .sampling import Sampler, structural_signature
@@ -48,6 +51,8 @@ from .spec import estimate, validate_spec
 BETA_DRIFT_DEG, BETA_SPIN_DEG, DRIFT_MIN_SPEED, MOVING = 20.0, 80.0, 0.8, 0.05
 PROGRESS_EVERY = 10          # control steps between progress / cancel checks inside a shard
 MAX_SHARD_BYTES = 256e6      # cap on a shard's float64 signal buffers (matters at the physics record rate)
+GPU_MAX_BATCH = 65536        # episodes simulated together on a GPU (MPS is near its peak from ~16k)
+GPU_CHUNK_BYTES = 1e9        # cap on the recorded signals of one GPU batch
 
 
 class SpecError(ValueError):
@@ -67,14 +72,64 @@ def _episode_seed(seed: int, i: int) -> int:
 
 
 # ----------------------------------------------------------------------------- core simulation
+def _backend(spec: dict, torch_device: str | None = None) -> tuple[str | None, Any, bool]:
+    """(torch device or None for the NumPy float64 reference, torch dtype, use torch.compile).
+
+    ``run.device`` "cpu" is the NumPy reference; "auto" picks CUDA, then MPS, else the reference.
+    ``torch_device`` forces the PyTorch backend on that device (tests use "cpu")."""
+    run = spec.get("run", {})
+    if torch_device is None:
+        dev = run.get("device", "cpu")
+        torch_device = None if dev == "cpu" else resolve_device(dev)
+        if torch_device == "cpu":
+            return None, None, False
+    if torch_device is None:
+        return None, None, False
+    return torch_device, torch_dtype(run.get("precision", "float32")), bool(run.get("compile", False))
+
+
+def _stepper(batch: VehicleBatch, model: Any, use_compile: bool, device: str) -> Callable[[Any, Any, int], Any]:
+    """``step(s, u, n)``: n integrator steps of ``batch.dt`` on the PyTorch backend, optionally fused
+    with ``torch.compile`` (falls back to eager PyTorch if compilation fails). Not on Apple GPUs: the
+    fused Metal kernels of this model need more than the 31 buffers Metal allows per kernel."""
+    method, dt = str(batch.params.sim.integrator), batch.dt
+
+    def one(s, u):
+        return integrator.step(rhs_model, s, dt, method, u, model)
+
+    fn = {"f": one}
+    if use_compile and device != "mps":
+        import torch
+        fn["f"] = torch.compile(one, dynamic=False)
+
+    def safe(s, u):
+        try:
+            return fn["f"](s, u)
+        except Exception as exc:          # compiler problem: keep going in eager mode
+            if fn["f"] is one:
+                raise
+            warnings.warn(f"torch.compile failed, continuing without it: {exc!r:.300}", RuntimeWarning)
+            fn["f"] = one
+            return one(s, u)
+
+    def step(s, u, n):
+        for _ in range(n):
+            s = safe(s, u)
+        return s
+    return step
+
+
 def simulate_episodes(spec: dict, ids: list[int], groups: list[str] | None = None,
                       tick: Callable[[float], None] | None = None,
-                      is_cancelled: Callable[[], bool] | None = None) -> tuple[np.ndarray, dict, list[dict]]:
+                      is_cancelled: Callable[[], bool] | None = None,
+                      torch_device: str | None = None) -> tuple[np.ndarray, dict, list[dict]]:
     """Simulate episodes ``ids`` of a normalized spec as one vectorized batch.
 
     Returns ``(t (T_rec,), data {signal: (n, T_rec[, 4])}, rows)`` where rows are the per-episode
     records (sampled values + outcome metrics). All episodes must share their structural settings.
     ``tick(fraction_done)`` is called every few steps; ``is_cancelled()`` aborts with ``Cancelled``.
+    ``spec["run"]["device"]`` picks the NumPy float64 reference ("cpu") or PyTorch on a GPU
+    (``torch_device`` overrides it); the data comes back as NumPy arrays either way.
     """
     groups = spec["export"]["signals"] if groups is None else groups
     sampler = Sampler(spec)
@@ -107,43 +162,55 @@ def simulate_episodes(spec: dict, ids: list[int], groups: list[str] | None = Non
         if d < T:
             applied[d:, cols] = cmd[:T - d, cols]
 
+    device, dtype, use_compile = _backend(spec, torch_device)
+    if device is None:                                 # NumPy float64 reference
+        xp, model = np, batch.model
+        dev = lambda a: a  # noqa: E731
+        zeros = lambda shape, dt=np.float64: np.zeros(shape, dtype=dt)  # noqa: E731
+        step = lambda s, u, n: batch.step(s, u, n_sub=n)[0]  # noqa: E731
+    else:                                              # PyTorch on a GPU (or CPU for tests)
+        import torch
+        xp, model = TORCH, to_device(batch.model, device, dtype)
+        dev = lambda a: torch.as_tensor(a, dtype=dtype, device=device)  # noqa: E731
+        zeros = lambda shape, dt=dtype: torch.zeros(shape, dtype=dt, device=device)  # noqa: E731
+        step = _stepper(batch, model, use_compile, device)
+        s = dev(s)
+
     sigs_sel = X.selected_signals(groups)
     want_info = X.needs_info(groups)
-    data = {sg["name"]: np.empty((B, T_rec, 4) if sg["per_wheel"] else (B, T_rec)) for sg in sigs_sel}
+    # action signals are known in advance and stay on the host; everything else is recorded where it is computed
+    data = {sg["name"]: (np.empty if sg["source"] == "action" or device is None else zeros)(
+        (B, T_rec, 4) if sg["per_wheel"] else (B, T_rec)) for sg in sigs_sel}
     # outcome metrics at the full control rate
-    max_beta = np.zeros(B)
-    drift_time = np.zeros(B)
-    spun = np.zeros(B, dtype=bool)
-    max_speed = np.zeros(B)
-    max_r = np.zeros(B)
-    dist = np.zeros(B)
+    max_beta, drift_time, max_speed, max_r, dist = (zeros(B) for _ in range(5))
+    spun = zeros(B, bool) if device is None else zeros(B, torch.bool)
 
-    def record(j_rec: int, k: int, s: np.ndarray) -> None:
+    def record(j_rec: int, k: int, s: Any) -> None:
         a_idx = min(k, T - 1)
-        info = derivatives_model(s, applied[a_idx], batch.model, want_info=True)[1] if want_info else None
+        info = derivatives_model(s, dev(applied[a_idx]), model, want_info=True)[1] if want_info else None
         for sg in sigs_sel:
             src, key = sg["source"], sg["src"]
             if src == "state":
                 val = s[:, key]
             elif src == "derived":
-                val = np.hypot(s[:, 3], s[:, 4]) if key == "speed" else np.arctan2(s[:, 4], s[:, 3])
+                val = xp.hypot(s[:, 3], s[:, 4]) if key == "speed" else xp.arctan2(s[:, 4], s[:, 3])
             elif src == "action":
                 val = (cmd if key.startswith("cmd") else applied)[a_idx, :, int(key[-1])]
             else:
-                val = np.asarray(info[key])
+                val = info[key] if device is not None else np.asarray(info[key])
             data[sg["name"]][:, j_rec] = val * sg["scale"] if "scale" in sg else val
 
-    def metrics(s: np.ndarray) -> None:
+    def metrics(s: Any) -> None:
         nonlocal max_beta, drift_time, spun, max_speed, max_r, dist
-        sp = np.hypot(s[:, 3], s[:, 4])
-        beta = np.degrees(np.abs(np.arctan2(s[:, 4], s[:, 3])))
+        sp = xp.hypot(s[:, 3], s[:, 4])
+        beta = xp.degrees(xp.abs(xp.arctan2(s[:, 4], s[:, 3])))
         moving = sp > MOVING
-        max_beta = np.where(moving, np.maximum(max_beta, beta), max_beta)
+        max_beta = xp.where(moving, xp.maximum(max_beta, beta), max_beta)
         drifting = moving & (beta > BETA_DRIFT_DEG) & (beta < BETA_SPIN_DEG) & (sp > DRIFT_MIN_SPEED)
         drift_time = drift_time + cdt * drifting
         spun = spun | (moving & (beta >= BETA_SPIN_DEG))
-        max_speed = np.fmax(max_speed, sp)
-        max_r = np.fmax(max_r, np.degrees(np.abs(s[:, 5])))
+        max_speed = xp.fmax(max_speed, sp)
+        max_r = xp.fmax(max_r, xp.degrees(xp.abs(s[:, 5])))
         dist = dist + sp * cdt
 
     j = 0
@@ -151,9 +218,11 @@ def simulate_episodes(spec: dict, ids: list[int], groups: list[str] | None = Non
         if rec[0] == 0:
             record(0, 0, s)
             j = 1
+        n_sub = batch.n_substeps // n_rec              # integrator steps between recordable steps
         for k in range(T):
+            u = dev(applied[k])
             for m in range(n_rec):                    # physics rate: one integrator step at a time
-                s, _ = batch.step(s, applied[k], n_sub=None if n_rec == 1 else 1)
+                s = step(s, u, n_sub)
                 idx = k * n_rec + m + 1
                 if j < T_rec and rec[j] == idx:
                     record(j, idx // n_rec, s)
@@ -164,8 +233,12 @@ def simulate_episodes(spec: dict, ids: list[int], groups: list[str] | None = Non
                     tick((k + 1) / T)
                 if is_cancelled is not None and is_cancelled():
                     raise Cancelled()
-    finite = np.all(np.isfinite(s), axis=1)
-    sp_end = np.hypot(s[:, 3], s[:, 4])
+        finite = xp.all(xp.isfinite(s), axis=1)
+        sp_end = xp.hypot(s[:, 3], s[:, 4])
+    if device is not None:                             # one copy back to the host per batch
+        data = {k: to_numpy(v) for k, v in data.items()}
+        max_beta, drift_time, spun, max_speed, max_r, dist, finite, sp_end = map(
+            to_numpy, (max_beta, drift_time, spun, max_speed, max_r, dist, finite, sp_end))
     rows = []
     for b, e in enumerate(eps):
         rows.append(dict(episode_id=e.id, **e.values,
@@ -176,6 +249,30 @@ def simulate_episodes(spec: dict, ids: list[int], groups: list[str] | None = Non
     if tick is not None:
         tick(1.0)
     return t, data, rows
+
+
+def _finish_shard(task: dict, spec: dict, out_dir: str, t: np.ndarray, data: dict, rows: list[dict],
+                  seconds: float) -> dict:
+    """Write one shard (``all/`` and, for its episodes that did not spin, ``not_spun/``) and return
+    the collected result."""
+    exp = spec["export"]
+    root, ids = Path(out_dir), np.asarray(task["ids"])
+
+    def write(folder: str, sel: Any) -> list[str]:
+        sub = {k: v[sel] for k, v in data.items()}
+        return [f"{folder}/{f}" for f in X.write_shard(root / folder, task["shard"], ids[sel], t, sub,
+                                                       exp["formats"], exp["float32"], exp["compress"])]
+
+    not_spun = np.array([not r["spun"] for r in rows])
+    files = write(X.ALL_DIR, slice(None))
+    if not_spun.any():                           # the same shard number, only the episodes that did not spin
+        files += write(X.NOT_SPUN_DIR, not_spun)
+    for r in rows:
+        r["shard"] = task["shard"]
+        r["group"] = task["group"]
+    return dict(key=task["key"], status="ok", shard=task["shard"], files=files, rows=rows, n=len(ids),
+                not_spun=int(not_spun.sum()), first_id=int(ids[0]), last_id=int(ids[-1]),
+                seconds=seconds, T_rec=len(t))
 
 
 def _run_shard(task: dict) -> dict:
@@ -195,25 +292,24 @@ def _run_shard(task: dict) -> dict:
         t, data, rows = simulate_episodes(task["spec"], task["ids"], tick=tick, is_cancelled=is_cancelled)
     except Cancelled:
         return dict(key=key, status="cancelled")
-    exp = task["spec"]["export"]
-    root, ids = Path(task["out_dir"]), np.asarray(task["ids"])
+    return _finish_shard(task, task["spec"], task["out_dir"], t, data, rows, time.perf_counter() - t0)
 
-    def write(folder: str, sel: Any) -> list[str]:
-        sub = {k: v[sel] for k, v in data.items()}
-        return [f"{folder}/{f}" for f in X.write_shard(root / folder, task["shard"], ids[sel], t, sub,
-                                                       exp["formats"], exp["float32"], exp["compress"])]
 
-    not_spun = np.array([not r["spun"] for r in rows])
-    files = write(X.ALL_DIR, slice(None))
-    if not_spun.any():                           # the same shard number, only the episodes that did not spin
-        files += write(X.NOT_SPUN_DIR, not_spun)
-    for r in rows:
-        r["shard"] = task["shard"]
-        r["group"] = task["group"]
-    return dict(key=key, status="ok", shard=task["shard"], files=files, rows=rows, n=n,
-                not_spun=int(not_spun.sum()),
-                first_id=int(task["ids"][0]), last_id=int(task["ids"][-1]),
-                seconds=time.perf_counter() - t0, T_rec=len(t))
+def _gpu_chunks(spec: dict, tasks: list[dict]) -> list[list[dict]]:
+    """Consecutive shards of one structural group, simulated together on the GPU (bounded by
+    ``GPU_MAX_BATCH`` episodes and ``GPU_CHUNK_BYTES`` of recorded signals)."""
+    est = estimate(spec)
+    per_episode = est["records_per_episode"] * est["columns"] * (4 if spec["run"]["precision"] == "float32" else 8)
+    cap = max(1, min(GPU_MAX_BATCH, int(GPU_CHUNK_BYTES // max(per_episode, 1))))
+    chunks: list[list[dict]] = []
+    for task in tasks:
+        cur = chunks[-1] if chunks else None
+        if (cur and cur[0]["group"] == task["group"]
+                and sum(len(x["ids"]) for x in cur) + len(task["ids"]) <= cap):
+            cur.append(task)
+        else:
+            chunks.append([task])
+    return chunks
 
 
 # ----------------------------------------------------------------------------- planning
@@ -258,6 +354,8 @@ def plan(spec: dict, workers: int | None = None) -> tuple[dict, list[dict], list
     per_episode = est["records_per_episode"] * est["columns"] * 8
     max_size = max(1, min(norm["export"]["shard_episodes"], int(MAX_SHARD_BYTES // max(per_episode, 1))))
     w = workers if workers not in (None, 0) else (norm["run"]["workers"] or _auto_workers())
+    if _backend(norm)[0] is not None:                # one GPU process; shards stay export.shard_episodes
+        w = 1
     tasks, shard = [], 0
     for gi, (sig, ids) in enumerate(sorted(groups.items(), key=lambda kv: kv[1][0])):
         size = max(1, min(max_size, max(MIN_SHARD, math.ceil(len(ids) / max(w, 1)))))
@@ -300,6 +398,7 @@ def run_batch(spec: dict, out_root: str | Path | None = None,
     """
     norm, tasks, warnings = plan(spec, workers)
     n = norm["episodes"]
+    gpu = _backend(norm)[0]
     root = Path(out_root) if out_root is not None else None
     if root is None:
         od = Path(norm["export"].get("out_dir") or "exports")
@@ -317,11 +416,12 @@ def run_batch(spec: dict, out_root: str | Path | None = None,
     manifest = dict(format_version=1, created=_dt.datetime.now().isoformat(timespec="seconds"),
                     rc_drift_sim_version=__version__, git_commit=_git_commit(), status="running",
                     spec=norm, warnings=warnings, episodes=n, signals=X.schema(norm["export"]["signals"]),
-                    wheel_order=list(X.WHEELS), shards=[], groups=len({t["group"] for t in tasks}))
+                    wheel_order=list(X.WHEELS), shards=[], groups=len({t["group"] for t in tasks}),
+                    device=gpu or "cpu (numpy)", precision=norm["run"]["precision"] if gpu else "float64")
     X.write_json(out_dir / "manifest.json", manifest)
 
     w = norm["run"]["workers"] if workers is None else int(workers)
-    w = _auto_workers(len(tasks)) if w <= 0 else min(w, len(tasks))
+    w = 1 if gpu else (_auto_workers(len(tasks)) if w <= 0 else min(w, len(tasks)))
     rows: list[dict] = []
     shards: list[dict] = []
     status, error = "complete", None
@@ -356,8 +456,32 @@ def run_batch(spec: dict, out_root: str | Path | None = None,
             report(0.0)
         return "complete"
 
+    def run_gpu(todo: list[dict]) -> str:
+        for chunk in _gpu_chunks(norm, todo):
+            if cancel is not None and cancel.is_set():
+                return "cancelled"
+            ids = [i for task in chunk for i in task["ids"]]
+            t0 = time.perf_counter()
+            try:
+                t, data, chunk_rows = simulate_episodes(
+                    norm, ids, tick=lambda f, m=len(ids): report(f * m),
+                    is_cancelled=lambda: cancel is not None and cancel.is_set())
+            except Cancelled:
+                return "cancelled"
+            per_episode = (time.perf_counter() - t0) / len(ids)
+            a = 0
+            for task in chunk:                       # split the GPU batch back into its shards
+                sl = slice(a, a + len(task["ids"]))
+                a = sl.stop
+                collect(_finish_shard(task, norm, str(out_dir), t, {k: v[sl] for k, v in data.items()},
+                                      chunk_rows[sl], per_episode * len(task["ids"])))
+            report(0.0)
+        return "complete"
+
     try:
-        if w == 1:
+        if gpu:
+            status = run_gpu(tasks)
+        elif w == 1:
             status = run_inline(tasks)
         else:
             ctx = get_context("spawn")
@@ -435,6 +559,7 @@ def preview(spec: dict, n: int = 6) -> dict:
         raise SpecError(errors)
     norm = dict(norm, episodes=min(norm["episodes"], n))
     norm["export"] = dict(norm["export"], decimation=1, record_rate="control")
+    norm["run"] = dict(norm["run"], device="cpu")      # a few episodes: the NumPy reference is quicker
     groups = ["pose", "velocity", "derived", "actions", "steering"]
     sampler = Sampler(norm)
     by_sig: dict[tuple, list[int]] = {}

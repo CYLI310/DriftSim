@@ -20,6 +20,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--host", default="127.0.0.1",
                     help="interface to bind (default 127.0.0.1: only this computer can connect)")
     ap.add_argument("--out", default=None, help="export root folder (default: <repo>/exports)")
+    ap.add_argument("--runs", default=None, help="RL training runs folder (default: rl_runs next to the exports)")
     ap.add_argument("--no-browser", action="store_true", help="do not open a browser window")
     ap.add_argument("--verbose", action="store_true", help="log every request")
     args = ap.parse_args(argv)
@@ -32,7 +33,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _stop)
     if hasattr(signal, "SIGHUP") and signal.getsignal(signal.SIGHUP) is not signal.SIG_IGN:
         signal.signal(signal.SIGHUP, _stop)
-    httpd = make_server(args.host, args.port, args.out, verbose=args.verbose)
+    httpd = make_server(args.host, args.port, args.out, verbose=args.verbose, runs_root=args.runs)
     if args.host not in ("127.0.0.1", "localhost"):
         print(f"warning: listening on {args.host}; anyone who can reach this address can start jobs")
     print(f"DriftSim dataset GUI: {httpd.url}  (exports go to {httpd.root})")
@@ -45,7 +46,8 @@ def main(argv: list[str] | None = None) -> int:
         print("\nstopping ...")
     finally:
         httpd.jobs.cancel_all()
-        if not httpd.jobs.wait_idle(timeout=15.0):
+        httpd.rl.stop_all()
+        if not (httpd.jobs.wait_idle(timeout=15.0) and httpd.rl.wait_idle(timeout=15.0)):
             print("a job did not stop within 15 s; exiting anyway")
         httpd.server_close()
         print("stopped")

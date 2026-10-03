@@ -22,6 +22,11 @@ import numpy as np
 from dataclasses import dataclass
 
 from .params import ActuatorParams, VehicleParams
+from .xp import is_torch, namespace
+
+
+def _f64(x):
+    return x if is_torch(x) else np.asarray(x, dtype=np.float64)
 
 
 # ----------------------------------------------------------------------------- precomputed model
@@ -60,25 +65,27 @@ def throttle_command_m(am: ActuatorModel, thr_cmd) -> np.ndarray:
 
 def steering_target_m(am: ActuatorModel, steer_cmd, yaw_rate) -> np.ndarray:
     """Servo target angle (rad) on a precomputed model; see ``steering_target``."""
-    yaw_rate = np.asarray(yaw_rate, dtype=np.float64)
+    xp = namespace(steer_cmd, yaw_rate)
+    yaw_rate = _f64(yaw_rate)
     c = apply_expo(deadband(steer_cmd, am.steer_deadband), am.steer_expo)
     delta = c * am.steer_max + am.steer_offset
-    correction = np.clip(am.gyro_gain_eff * yaw_rate, -am.gyro_max_correction, am.gyro_max_correction)
-    return np.clip(delta - correction, -am.steer_max, am.steer_max)
+    correction = xp.clip(am.gyro_gain_eff * yaw_rate, -am.gyro_max_correction, am.gyro_max_correction)
+    return xp.clip(delta - correction, -am.steer_max, am.steer_max)
 
 
 def steering_rate_m(am: ActuatorModel, delta, delta_target) -> np.ndarray:
     """Servo slew ``clip((target - delta)/servo_tau, -servo_rate, servo_rate)`` (rad/s)."""
-    return np.clip((np.asarray(delta_target, dtype=np.float64) - np.asarray(delta, dtype=np.float64))
-                   / am.servo_tau, -am.servo_rate, am.servo_rate)
+    return namespace(delta, delta_target).clip((_f64(delta_target) - _f64(delta)) / am.servo_tau,
+                                               -am.servo_rate, am.servo_rate)
 
 
 def ackermann_angles_m(L, half_track, ackermann, delta) -> tuple[np.ndarray, np.ndarray]:
     """``ackermann_angles`` on plain numbers or per-car arrays (wheelbase, half track, blend 0..1)."""
-    delta = np.asarray(delta, dtype=np.float64)
-    s, c = np.sin(delta), np.cos(delta)
-    full_fl = np.arctan2(L * s, L * c - half_track * s)
-    full_fr = np.arctan2(L * s, L * c + half_track * s)
+    xp = namespace(delta)
+    delta = _f64(delta)
+    s, c = xp.sin(delta), xp.cos(delta)
+    full_fl = xp.arctan2(L * s, L * c - half_track * s)
+    full_fr = xp.arctan2(L * s, L * c + half_track * s)
     return (1.0 - ackermann) * delta + ackermann * full_fl, (1.0 - ackermann) * delta + ackermann * full_fr
 
 
@@ -89,9 +96,10 @@ def deadband(x: float | np.ndarray, db: float) -> np.ndarray:
     ``y = sign(x) * max(|x| - db, 0) / (1 - db)``, input clipped to [-1, 1] first. ``db`` is a
     normalized command width in [0, 1). Odd-symmetric in ``x``.
     """
-    x = np.clip(np.asarray(x, dtype=np.float64), -1.0, 1.0)
-    span = np.maximum(1.0 - db, 1e-12)      # config guard: db >= 1 would divide by zero
-    return np.sign(x) * np.maximum(np.abs(x) - db, 0.0) / span
+    xp = namespace(x, db)
+    x = xp.clip(_f64(x), -1.0, 1.0)
+    span = namespace(db).maximum(1.0 - db, 1e-12)      # config guard: db >= 1 would divide by zero
+    return xp.sign(x) * xp.maximum(xp.abs(x) - db, 0.0) / span
 
 
 def apply_expo(x: float | np.ndarray, expo: float) -> np.ndarray:
@@ -99,7 +107,7 @@ def apply_expo(x: float | np.ndarray, expo: float) -> np.ndarray:
 
     ``expo = 0`` is linear, ``expo = 1`` is purely cubic. Preserves ``y(+-1) = +-1`` and odd symmetry.
     """
-    x = np.asarray(x, dtype=np.float64)
+    x = _f64(x)
     return (1.0 - expo) * x + expo * x ** 3
 
 

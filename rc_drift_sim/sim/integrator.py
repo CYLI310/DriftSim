@@ -22,6 +22,12 @@ from typing import Any, Callable
 import numpy as np
 
 from .state import POSE, R, VX, VY, X, Y, YAW
+from .xp import is_torch, namespace
+
+
+def _f64(s: Any) -> Any:
+    """Float64 NumPy array; a torch tensor keeps its own dtype and device (GPU backend)."""
+    return s if is_torch(s) else np.asarray(s, dtype=np.float64)
 
 Rhs = Callable[..., np.ndarray]
 
@@ -35,7 +41,7 @@ def rk4_step(f: Rhs, s: np.ndarray, dt: float, *args: Any) -> np.ndarray:
     ``s_new = s + dt/6 (k1 + 2 k2 + 2 k3 + k4)``. ``f(s, *args)`` must return ``ds`` only.
     Returns a new array; ``s`` is untouched.
     """
-    s = np.asarray(s, dtype=np.float64)
+    s = _f64(s)
     h = float(dt)
     k1 = f(s, *args)
     k2 = f(s + 0.5 * h * k1, *args)
@@ -56,15 +62,16 @@ def semi_implicit_euler_step(f: Rhs, s: np.ndarray, dt: float, *args: Any) -> np
     First-order accurate; cheaper than RK4 (one RHS evaluation) and the pose update is
     consistent with the velocity that will hold over the next interval. Works on (..., NS).
     """
-    s = np.asarray(s, dtype=np.float64)
+    s = _f64(s)
+    xp = namespace(s)
     h = float(dt)
     s_e = s + h * f(s, *args)                              # explicit Euler for everything
     vx_n, vy_n, r_n = s_e[..., VX], s_e[..., VY], s_e[..., R]   # NEW body velocities / yaw rate
     yaw_n = s[..., YAW] + h * r_n
-    c, sn = np.cos(yaw_n), np.sin(yaw_n)
+    c, sn = xp.cos(yaw_n), xp.sin(yaw_n)
     x_n = s[..., X] + h * (vx_n * c - vy_n * sn)
     y_n = s[..., Y] + h * (vx_n * sn + vy_n * c)
-    return np.concatenate([np.stack([x_n, y_n, yaw_n], axis=-1), s_e[..., POSE.stop:]], axis=-1)
+    return xp.concatenate([xp.stack([x_n, y_n, yaw_n], axis=-1), s_e[..., POSE.stop:]], axis=-1)
 
 
 def step(f: Rhs, s: np.ndarray, dt: float, method: str, *args: Any) -> np.ndarray:
@@ -85,7 +92,7 @@ def integrate(f: Rhs, s: np.ndarray, dt: float, n_steps: int, method: str,
     """
     if method not in METHODS:
         raise ValueError(f"unknown integrator {method!r}; expected one of {METHODS}")
-    s_cur = np.asarray(s, dtype=np.float64)
+    s_cur = _f64(s)
     for _ in range(int(n_steps)):
         s_cur = step(f, s_cur, dt, method, *args)
     return s_cur

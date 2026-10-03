@@ -339,6 +339,12 @@ for explicit Euler), so RK4 stays the default; the 4x cheaper Euler would need a
 wheel/tire-slip update to be usable (candidate for the JAX port).
 No in-place mutation of state arrays; write NumPy in a JAX-portable style (np.where instead of
 Python if/else on array VALUES; Python control flow only on configuration).
+The array core (`*_m` functions, `derivatives_model`, the integrators) calls `xp = namespace(...)`
+from `sim/xp.py` and uses NumPy-named functions on it: the `numpy` module for NumPy arrays (the
+float64 reference, unchanged) or a thin PyTorch adapter for tensors (Apple MPS / NVIDIA CUDA).
+Configuration checks that used to test model values are boolean model fields
+(`VehicleModel.parallel_steer`, `TireModel.has_pkx3`, `DrivetrainModel.has_drag_brake`), so the
+GPU path never reads a value back from the device.
 
 ## 9. Visualization (`viz/`)
 

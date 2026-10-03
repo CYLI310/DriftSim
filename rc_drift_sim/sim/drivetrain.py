@@ -28,6 +28,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from .params import DrivetrainParams, VehicleParams
+from .xp import namespace
 
 LAYOUTS = ("rwd", "awd_spool", "awd_overdrive")
 
@@ -109,6 +110,7 @@ class DrivetrainModel:
     inv_thr_min: float
     reverse_enabled: bool
     drag_brake: float
+    has_drag_brake: bool     # drag_brake != 0 (configuration flag of the ESC formula)
 
 
 def drivetrain_model(dp: DrivetrainParams, vp: VehicleParams) -> DrivetrainModel:
@@ -133,38 +135,41 @@ def drivetrain_model(dp: DrivetrainParams, vp: VehicleParams) -> DrivetrainModel
         v0=float(dp.battery_voltage), r_batt=float(dp.battery_resistance),
         inv_thr_min=1.0 / max(float(dp.throttle_min), 1e-9),
         reverse_enabled=bool(dp.reverse_enabled), drag_brake=float(dp.drag_brake),
+        has_drag_brake=float(dp.drag_brake) != 0.0,
     )
 
 
 # ----------------------------------------------------------------------------- array core
 def shaft_speed_m(dm: DrivetrainModel, omega: np.ndarray) -> np.ndarray:
     """Motor shaft speed (rad/s) = mean over driven wheels of ``G_i * omega_i``; omega (..., 4)."""
-    return np.sum(dm.G_driven * omega, axis=-1)
+    return namespace(omega).sum(dm.G_driven * omega, axis=-1)
 
 
 def esc_command_m(dm: DrivetrainModel, i, omega_m, thr) -> tuple[np.ndarray, np.ndarray]:
     """ESC bridge voltage ``V_cmd`` (V) and effective conductance ``g_eff`` (0..1); see ``esc_command``."""
-    abs_thr = np.abs(thr)
-    v_batt = dm.v0 - dm.r_batt * np.abs(i) * abs_thr
+    xp = namespace(i, omega_m, thr)
+    abs_thr = xp.abs(thr)
+    v_batt = dm.v0 - dm.r_batt * xp.abs(i) * abs_thr
     v_cmd = thr * v_batt
-    g = np.minimum(abs_thr * dm.inv_thr_min, 1.0)
+    g = xp.minimum(abs_thr * dm.inv_thr_min, 1.0)
     if not dm.reverse_enabled:                         # configuration branch
         brake = thr < 0.0
-        v_cmd = np.where(brake, 0.0, v_cmd)
-        g = np.where(brake, abs_thr, g)
-    if np.any(dm.drag_brake != 0.0):                   # parameter check, not a traced value
+        v_cmd = xp.where(brake, 0.0, v_cmd)
+        g = xp.where(brake, abs_thr, g)
+    if dm.has_drag_brake:                              # parameter check, not a traced value
         g = g + (1.0 - g) * dm.drag_brake
     emf = dm.ke * omega_m
-    v_cmd = np.clip(v_cmd, emf - dm.v_lim, emf + dm.v_lim)
+    v_cmd = xp.clip(v_cmd, emf - dm.v_lim, emf + dm.v_lim)
     return v_cmd, g
 
 
 def voltages_m(dm: DrivetrainModel, i, omega_m, thr) -> tuple[np.ndarray, np.ndarray]:
     """Battery terminal voltage and mean motor terminal voltage ``Ke*omega_m + g_eff*(V_cmd - Ke*omega_m)``
     (V), i.e. ``R_m*i + L di/dt + Ke*omega_m`` of ``current_derivative_m``. Diagnostics only."""
+    xp = namespace(i, omega_m, thr)
     v_cmd, g = esc_command_m(dm, i, omega_m, thr)
     emf = dm.ke * omega_m
-    return dm.v0 - dm.r_batt * np.abs(i) * np.abs(thr), emf + g * (v_cmd - emf)
+    return dm.v0 - dm.r_batt * xp.abs(i) * xp.abs(thr), emf + g * (v_cmd - emf)
 
 
 def current_derivative_m(dm: DrivetrainModel, i, omega_m, thr) -> np.ndarray:
@@ -175,7 +180,8 @@ def current_derivative_m(dm: DrivetrainModel, i, omega_m, thr) -> np.ndarray:
 
 def motor_torque_m(dm: DrivetrainModel, i, omega_m) -> np.ndarray:
     """Net motor shaft torque ``Kt*i - b_m*omega_m - Tc_m*tanh(omega_m/5)`` (N m)."""
-    return dm.kt * i - dm.b_m * omega_m - dm.tc_m * np.tanh(omega_m * (1.0 / COULOMB_SMOOTH_SPEED))
+    xp = namespace(i, omega_m)
+    return dm.kt * i - dm.b_m * omega_m - dm.tc_m * xp.tanh(omega_m * (1.0 / COULOMB_SMOOTH_SPEED))
 
 
 def axle_torques(T_axle, tau_L, tau_R, omega_L, omega_R, lock, max_torque, visc
@@ -194,7 +200,7 @@ def axle_torques(T_axle, tau_L, tau_R, omega_L, omega_R, lock, max_torque, visc
     * ``visc`` (N m s/rad) is a viscous coupling / Baumgarte stabilizer; the side-to-side speed
       difference decays with time constant ``I / (2 visc)`` (equal inertias ``I``).
     """
-    T_c = (np.clip(lock * (tau_L - tau_R) * 0.5, -max_torque, max_torque)
+    T_c = (namespace(tau_L, tau_R).clip(lock * (tau_L - tau_R) * 0.5, -max_torque, max_torque)
            + visc * (omega_R - omega_L))
     return 0.5 * T_axle + T_c, 0.5 * T_axle - T_c
 
@@ -217,10 +223,10 @@ def wheel_accelerations_m(dm: DrivetrainModel, omega: np.ndarray, T_motor, tau: 
                                 dm.lock[..., 0], dm.max_torque[..., 0], dm.visc[..., 0])
     else:
         T_r_shaft = T_motor
-        TfL = TfR = np.zeros_like(oFL)                # undriven front wheels: free rolling
+        TfL = TfR = namespace(oFL).zeros_like(oFL)    # undriven front wheels: free rolling
     TrL, TrR = axle_torques(dm.Gr * T_r_shaft, tRL, tRR, oRL, oRR,
                             dm.lock[..., 1], dm.max_torque[..., 1], dm.visc[..., 1])
-    T_wheel = np.stack([TfL, TfR, TrL, TrR], axis=-1)
+    T_wheel = namespace(oFL).stack([TfL, TfR, TrL, TrR], axis=-1)
     return (T_wheel - tau) * dm.inv_inertia
 
 
