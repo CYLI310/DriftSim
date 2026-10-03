@@ -43,7 +43,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import numpy as np
 
@@ -51,6 +51,7 @@ from .. import __version__
 from ..datagen import build_catalog, default_spec, estimate, preview, run_batch, validate_spec
 from ..sim.xp import available_devices
 from ..datagen.runner import SpecError, default_out_root
+from .rl_runs import RLManager, available as rl_available
 
 STATIC = Path(__file__).resolve().parent / "static"
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples" / "specs"
@@ -467,6 +468,105 @@ class Handler(BaseHTTPRequestHandler):
         _open_folder(d)
         self._json(dict(ok=True, path=str(d)))
 
+    # --------------------------------------------------------------- RL training
+    def _rl_folder(self, name: str) -> str:
+        name = unquote(name)
+        if not NAME_RE.match(name):
+            raise _HttpError(HTTPStatus.NOT_FOUND, "no such run")
+        return name
+
+    def rl_catalog(self) -> None:
+        ok, why = rl_available()
+        out = dict(available=ok, reason=why, devices=available_devices(), runs_root=str(self.app.rl.root))
+        if ok:
+            from ..rl.catalog import catalog
+            out["catalog"] = catalog()
+        self._json(out)
+
+    def rl_validate(self) -> None:
+        body = self._body()
+        ok, why = rl_available()
+        if not ok:
+            return self._json(dict(errors=[why], iterations=None))
+        from ..rl.catalog import build_configs
+        env_cfg, ppo, run, errors = build_configs(body if isinstance(body, dict) else {})
+        it = None
+        if ppo:
+            it = max(1, ppo["total_steps"] // (ppo["num_envs"] * ppo["rollout"]))
+        self._json(dict(errors=errors, iterations=it,
+                        samples_per_iteration=ppo["num_envs"] * ppo["rollout"] if ppo else None))
+
+    def rl_list(self) -> None:
+        self._json(dict(runs=self.app.rl.list(), root=str(self.app.rl.root)))
+
+    def rl_start(self) -> None:
+        body = self._body()
+        try:
+            run = self.app.rl.start(body if isinstance(body, dict) else {})
+        except ValueError as exc:
+            raise _HttpError(HTTPStatus.BAD_REQUEST, str(exc)) from None
+        self._json(run.to_json(), HTTPStatus.CREATED)
+
+    def rl_get(self, name: str) -> None:
+        q = parse_qs(urlparse(self.path).query)
+        since = int((q.get("since") or ["0"])[0] or 0)
+        try:
+            self._json(self.app.rl.get(self._rl_folder(name), max(0, since)))
+        except (FileNotFoundError, OSError, ValueError):
+            raise _HttpError(HTTPStatus.NOT_FOUND, "no such run") from None
+
+    def rl_stop(self, name: str) -> None:
+        self._body()
+        run = self.app.rl.stop(self._rl_folder(name))
+        if run is None:
+            raise _HttpError(HTTPStatus.NOT_FOUND, "no such run in this session")
+        self._json(run.summary())
+
+    def rl_snapshot(self, name: str, snap: str) -> None:
+        try:
+            self._json(self.app.rl.snapshot(self._rl_folder(name), unquote(snap)))
+        except (FileNotFoundError, OSError, ValueError):
+            raise _HttpError(HTTPStatus.NOT_FOUND, "no such snapshot") from None
+
+    def rl_rollout(self, name: str) -> None:
+        body = self._body() or {}
+        policy = body.get("policy", "policy")
+        if policy not in ("policy", "lqr", "zero"):
+            raise _HttpError(HTTPStatus.BAD_REQUEST, "policy must be policy, lqr or zero")
+        init = body.get("init_drift")
+        try:
+            data = self.app.rl.rollout(self._rl_folder(name), policy, int(body.get("seed", 0)),
+                                       None if init is None else bool(init))
+        except FileNotFoundError as exc:
+            raise _HttpError(HTTPStatus.NOT_FOUND, str(exc) or "no such run") from None
+        except RuntimeError as exc:
+            raise _HttpError(HTTPStatus.BAD_REQUEST, str(exc)) from None
+        self._json(data)
+
+    def rl_file(self, name: str, fname: str) -> None:
+        try:
+            f = self.app.rl.file(self._rl_folder(name), unquote(fname))
+        except (FileNotFoundError, OSError):
+            raise _HttpError(HTTPStatus.NOT_FOUND, "no such file") from None
+        size = f.stat().st_size
+        self.send_response(200)
+        self.send_header("Content-Type", mimetypes.guess_type(f.name)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition", f'attachment; filename="{self._rl_folder(name)}_{f.name}"')
+        self.end_headers()
+        with open(f, "rb") as fh:
+            while chunk := fh.read(1 << 20):
+                self.wfile.write(chunk)
+
+    def rl_reveal(self, name: str) -> None:
+        self._body()
+        try:
+            d = self.app.rl._dir(self._rl_folder(name))
+        except FileNotFoundError:
+            raise _HttpError(HTTPStatus.NOT_FOUND, "no such run") from None
+        _open_folder(d)
+        self._json(dict(ok=True, path=str(d)))
+
 
 class _HttpError(Exception):
     def __init__(self, status: int, message: str, **extra):
@@ -489,17 +589,30 @@ ROUTES = [(m, re.compile(p), fn) for m, p, fn in [
     ("GET", rf"/api/datasets/{_N}/zip", Handler.dataset_zip),
     ("GET", rf"/api/datasets/{_N}/files/{_N}", Handler.dataset_file),
     ("POST", rf"/api/datasets/{_N}/reveal", Handler.dataset_reveal),
+    ("GET", r"/api/rl/catalog", Handler.rl_catalog),
+    ("POST", r"/api/rl/validate", Handler.rl_validate),
+    ("GET", r"/api/rl/runs", Handler.rl_list),
+    ("POST", r"/api/rl/runs", Handler.rl_start),
+    ("GET", rf"/api/rl/runs/{_N}", Handler.rl_get),
+    ("POST", rf"/api/rl/runs/{_N}/stop", Handler.rl_stop),
+    ("GET", rf"/api/rl/runs/{_N}/snapshots/{_N}", Handler.rl_snapshot),
+    ("POST", rf"/api/rl/runs/{_N}/rollout", Handler.rl_rollout),
+    ("GET", rf"/api/rl/runs/{_N}/files/{_N}", Handler.rl_file),
+    ("POST", rf"/api/rl/runs/{_N}/reveal", Handler.rl_reveal),
 ]]
 
 
 class GuiServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, host: str, port: int, root: Path, verbose: bool = False):
+    def __init__(self, host: str, port: int, root: Path, verbose: bool = False, runs_root: Path | None = None):
         super().__init__((host, port), Handler)
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.jobs = JobManager(self.root)
+        rl_root = Path(runs_root) if runs_root is not None else self.root.parent / "rl_runs"
+        rl_root.mkdir(parents=True, exist_ok=True)
+        self.rl = RLManager(rl_root)
         self.verbose = verbose
         p = self.server_address[1]
         names = {"127.0.0.1", "localhost", "[::1]"}
@@ -513,13 +626,14 @@ class GuiServer(ThreadingHTTPServer):
 
 
 def make_server(host: str = "127.0.0.1", port: int = 8765, root: str | Path | None = None,
-                verbose: bool = False, port_tries: int = 20) -> GuiServer:
-    """Create (not start) the server; if ``port`` is taken, the next free port is used."""
+                verbose: bool = False, port_tries: int = 20, runs_root: str | Path | None = None) -> GuiServer:
+    """Create (not start) the server; if ``port`` is taken, the next free port is used. RL training
+    runs go to ``runs_root`` (default: ``rl_runs`` next to the export root)."""
     root = Path(root) if root is not None else default_out_root()
     last: OSError | None = None
     for p in ([port] if port == 0 else range(port, port + port_tries)):
         try:
-            return GuiServer(host, p, root, verbose)
+            return GuiServer(host, p, root, verbose, None if runs_root is None else Path(runs_root))
         except OSError as exc:
             last = exc
     raise OSError(f"no free port in {port}..{port + port_tries - 1}: {last}")

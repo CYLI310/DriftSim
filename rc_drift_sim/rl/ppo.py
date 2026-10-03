@@ -111,11 +111,16 @@ def _to(x: Any, device: str) -> torch.Tensor:
 
 
 def train(env_cfg: EnvConfig, ppo: PPOConfig | None = None, device: str = "cpu", out: str | Path | None = None,
-          log: Callable[[dict], None] | None = print) -> tuple[ActorCritic, list[dict]]:
-    """Train a policy; returns ``(model, history)`` (one dict per iteration)."""
+          log: Callable[[dict], None] | None = print, stop: Callable[[], bool] | None = None,
+          on_iteration: Callable[[dict, "ActorCritic"], None] | None = None,
+          precision: str = "float32") -> tuple[ActorCritic, list[dict]]:
+    """Train a policy; returns ``(model, history)`` (one dict per iteration).
+
+    ``stop()`` is checked every control step (training ends early, keeping the last saved policy);
+    ``on_iteration(row, model)`` runs after each iteration (the GUI records policy snapshots there)."""
     ppo = ppo or PPOConfig()
     torch.manual_seed(ppo.seed)
-    env = DriftBatchEnv(ppo.num_envs, env_cfg, device=device)
+    env = DriftBatchEnv(ppo.num_envs, env_cfg, device=device, precision=precision)
     tdev = env.device or "cpu"
     B, R = env.num_envs, ppo.rollout
     model = ActorCritic(env.n_obs, 2, tuple(ppo.hidden), ppo.init_log_std).to(tdev)
@@ -123,7 +128,7 @@ def train(env_cfg: EnvConfig, ppo: PPOConfig | None = None, device: str = "cpu",
     out = Path(out) if out is not None else None
     if out is not None:
         out.mkdir(parents=True, exist_ok=True)
-    obs = _to(env.reset(seed=ppo.seed), tdev)
+    obs = _to(env.last_obs, tdev)                     # the env started its episode sequence from env_cfg.seed
     n_iter = max(1, ppo.total_steps // (B * R))
     buf = {k: torch.zeros((R, B) + s, device=tdev) for k, s in
            dict(obs=(env.n_obs,), act=(2,), logp=(), rew=(), done=(), val=()).items()}
@@ -132,7 +137,11 @@ def train(env_cfg: EnvConfig, ppo: PPOConfig | None = None, device: str = "cpu",
     for it in range(1, n_iter + 1):
         ep_returns: list[float] = []
         ep_lengths: list[float] = []
+        if stop is not None and stop():
+            break
         for t in range(R):
+            if stop is not None and stop():
+                break
             with torch.no_grad():
                 model.norm.update(obs)
                 on = model.norm(obs)
@@ -154,6 +163,8 @@ def train(env_cfg: EnvConfig, ppo: PPOConfig | None = None, device: str = "cpu",
                 ep_lengths += _to(info["episode_length"], tdev)[idx].tolist()
             buf["rew"][t], buf["done"][t] = r, torch.clamp(te + tr, 0.0, 1.0)
             obs = _to(o2, tdev)
+        if stop is not None and stop():               # stopped inside the rollout: discard the partial batch
+            break
         steps += B * R
         with torch.no_grad():                            # GAE
             next_v = model.value(model.norm(obs))
@@ -205,6 +216,8 @@ def train(env_cfg: EnvConfig, ppo: PPOConfig | None = None, device: str = "cpu",
             with open(out / "log.jsonl", "a") as f:
                 f.write(json.dumps(row) + "\n")
             save_policy(model, out / "policy.pt", env_cfg, ppo, env.obs_names)
+        if on_iteration is not None:
+            on_iteration(row, model)
     return model, history
 
 

@@ -319,3 +319,26 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .row-ctl { grid-column: 1; grid-row: auto; }
   .topbar { flex-direction: column; align-items: flex-start; }
 }
+
+/* ------------------------------------------------------------ RL pages (rl.js) */
+.form-grid label.changed { color: var(--modified); font-weight: 600; }
+.rl-desc { flex-basis: 100%; margin-top: -2px; }
+table.data tr.selected td { background: var(--accent-soft); }
+.timeline { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 8px; }
+.thumb {
+  flex: 0 0 auto; width: 168px; padding: 6px; border: 1px solid var(--border); border-radius: 9px;
+  background: var(--panel-2); color: var(--text); font: inherit; text-align: left; cursor: pointer;
+}
+.thumb:hover { border-color: var(--border-strong); }
+.thumb.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.thumb canvas { width: 154px; height: 113px; display: block; border-radius: 6px; margin-bottom: 4px; }
+.viewer { position: relative; margin-top: 8px; }
+.viewer canvas.scene { width: 100%; height: 440px; display: block; border-radius: 9px; border: 1px solid var(--border); }
+.hud {
+  position: absolute; top: 8px; left: 8px; padding: 6px 9px; border-radius: 7px; font-size: 12px; line-height: 1.45;
+  background: color-mix(in srgb, var(--panel) 85%, transparent); border: 1px solid var(--border); pointer-events: none;
+}
+.playbar { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.playbar input[type=range] { flex: 1; }
+.toggle.small { font-size: 12.5px; }
+@media (max-width: 760px) { .viewer canvas.scene { height: 300px; } }

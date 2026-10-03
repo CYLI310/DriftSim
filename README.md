@@ -137,6 +137,10 @@ To run from the source checkout instead, double-click `scripts\windows\Start Dri
 
 ## Reinforcement learning
 
+The GUI's **RL training** page sets every training parameter and starts PPO; **RL runs** shows live
+learning curves, a timeline of episodes the policy drove during training and an animated episode
+viewer. From Python:
+
 ```python
 import gymnasium as gym
 import rc_drift_sim.rl as rl

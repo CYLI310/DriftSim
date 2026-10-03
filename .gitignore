@@ -18,6 +18,8 @@ venv/
 
 # batch data exported from the GUI / datagen (can be many GB); outputs/ stays tracked
 exports/
+rl_runs/
+runs/
 
 # example outputs
 examples/output/

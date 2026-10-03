@@ -86,7 +86,12 @@
     { id: "sim", label: "Simulation", group: "sim" },
     { sep: true },
     { id: "runs", label: "Runs & datasets" },
+    { sep: true },
+    { id: "rl", label: "RL training" },
+    { id: "rlruns", label: "RL runs" },
   ];
+  // Extra pages (rl.js) register here: { render(), summary(), count(), json: {get, set, name}, reset() }
+  const EXT = {};
   const INTRO = {
     vehicle: "Mass, size and weight distribution of the car.",
     drivetrain: "Layout, gearing, motor, battery, ESC and differentials.",
@@ -247,9 +252,10 @@
       return Object.keys(d).filter((k) => JSON.stringify(e[k]) !== JSON.stringify(d[k])).length + (S.spec.run.workers !== S.defaultSpec.run.workers ? 1 : 0);
     }
     if (id === "runs") return S.jobs.filter((j) => j.status === "running" || j.status === "queued").length;
+    if (EXT[id]) return EXT[id].count ? EXT[id].count() : 0;
     return Object.keys(p).filter((k) => k === id || k.startsWith(id + ".")).length;
   }
-  function sectionHasError(id) { return S.val.errors.some((e) => { const k = errorKey(e); return k ? sectionOf(k) === id : id === "batch"; }); }
+  function sectionHasError(id) { if (EXT[id]) return !!(EXT[id].hasError && EXT[id].hasError()); return S.val.errors.some((e) => { const k = errorKey(e); return k ? sectionOf(k) === id : id === "batch"; }); }
 
   function renderSidebar() {
     const nav = $("#sidebar");
@@ -282,6 +288,7 @@
     else if (sec === "maneuver") node = renderManeuver();
     else if (sec === "export") node = renderExport();
     else if (sec === "runs") node = renderRuns();
+    else if (EXT[sec]) node = EXT[sec].render();
     else node = renderGroup(sec);
     c.replaceChildren(node);
   }
@@ -725,6 +732,7 @@
     return el;
   }
   function renderSummary() {
+    if (EXT[S.section] && EXT[S.section].summary) { S.sum = null; return EXT[S.section].summary(); }
     const el = ensureSummary();
     const sp = S.spec, v = S.val, est = v.estimate;
     const running = S.jobs.filter((j) => j.status === "running" || j.status === "queued");
@@ -874,7 +882,8 @@
     for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9 * step; v += step) out.push(Math.abs(v) < 1e-12 ? 0 : +v.toPrecision(10));
     return out;
   }
-  function drawChart(cv, series, { equal = false, hlines = [], xLabel = "" } = {}) {
+  // hlines: numbers or {y, label, color}; vline: x of a cursor; series items may set dash and width
+  function drawChart(cv, series, { equal = false, hlines = [], xLabel = "", vline = null, yRange = null } = {}) {
     const dpr = window.devicePixelRatio || 1;
     const W = cv.clientWidth, H = cv.clientHeight;
     if (!W || !H) return;
@@ -889,7 +898,10 @@
       if (x == null || y == null) continue;
       if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
     }
-    if (!isFinite(x0)) { ctx.fillStyle = cText; ctx.fillText("no finite data", 10, 20); return; }
+    if (!isFinite(x0)) { ctx.fillStyle = cText; ctx.fillText("no data yet", 10, 20); return; }
+    const hl = hlines.map((v) => (typeof v === "number" ? { y: v } : v));
+    for (const l of hl) if (l.label) { y0 = Math.min(y0, l.y); y1 = Math.max(y1, l.y); }
+    if (yRange) { y0 = Math.min(y0, yRange[0]); y1 = Math.max(y1, yRange[1]); }
     if (y1 - y0 < 1e-9) { y0 -= 1; y1 += 1; }
     if (x1 - x0 < 1e-9) { x0 -= 1; x1 += 1; }
     const py = 0.06 * (y1 - y0); y0 -= py; y1 += py;
@@ -909,12 +921,21 @@
     for (const t of niceTicks(x0, x1, 6)) { ctx.beginPath(); ctx.moveTo(X(t), m.t); ctx.lineTo(X(t), H - m.b); ctx.stroke(); ctx.fillText(fmtNum(t), X(t), H - m.b + 5); }
     ctx.textAlign = "right"; ctx.fillText(xLabel, W - m.r, H - 12);
     ctx.setLineDash([4, 4]);
-    for (const hl of hlines) if (hl > y0 && hl < y1) { ctx.beginPath(); ctx.moveTo(m.l, Y(hl)); ctx.lineTo(W - m.r, Y(hl)); ctx.stroke(); }
-    ctx.setLineDash([]);
+    const placed = [];                                   // label rows already used, so close lines do not overlap
+    for (const l of [...hl].sort((a, b) => b.y - a.y)) {
+      if (!(l.y > y0 && l.y < y1)) continue;
+      ctx.strokeStyle = l.color || cGrid; ctx.beginPath(); ctx.moveTo(m.l, Y(l.y)); ctx.lineTo(W - m.r, Y(l.y)); ctx.stroke();
+      if (!l.label) continue;
+      let ty = Y(l.y) - 2;
+      while (placed.some((p) => Math.abs(p - ty) < 12)) ty += 12;
+      placed.push(ty);
+      ctx.fillStyle = l.color || cText; ctx.textAlign = "left"; ctx.textBaseline = "bottom"; ctx.fillText(l.label, m.l + 4, ty);
+    }
+    ctx.setLineDash([]); ctx.strokeStyle = cGrid; ctx.fillStyle = cText;
     ctx.save(); ctx.beginPath(); ctx.rect(m.l, m.t, pw, ph); ctx.clip();
     ctx.lineWidth = 1.6; ctx.lineJoin = "round";
     for (const s of series) {
-      ctx.strokeStyle = s.color; ctx.beginPath();
+      ctx.strokeStyle = s.color; ctx.lineWidth = s.width || 1.6; ctx.setLineDash(s.dash || []); ctx.beginPath();
       let pen = false;
       for (let i = 0; i < s.x.length; i++) {
         const x = s.x[i], y = s.y[i];
@@ -922,6 +943,10 @@
         if (pen) ctx.lineTo(X(x), Y(y)); else { ctx.moveTo(X(x), Y(y)); pen = true; }
       }
       ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    if (vline != null && vline >= x0 && vline <= x1) {
+      ctx.strokeStyle = cText; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(X(vline), m.t); ctx.lineTo(X(vline), H - m.b); ctx.stroke();
     }
     ctx.restore();
   }
@@ -944,19 +969,34 @@
       try {
         let spec = JSON.parse(await f.text());
         if (spec.spec && spec.format_version) spec = spec.spec;
-        loadSpec(spec, f.name);
+        if ((spec.ppo || spec.reward) && EXT.rl && EXT.rl.json) { EXT.rl.json.set(spec, f.name); S.section = "rl"; render(); }
+        else loadSpec(spec, f.name);
       } catch (e) { toast(`Could not read ${f.name}: ${e.message}`, "bad"); }
       ev.target.value = "";
     });
-    $("#export-btn").addEventListener("click", () => download(`${S.spec.name || "batch"}.json`, JSON.stringify(S.spec, null, 2)));
-    $("#reset-btn").addEventListener("click", () => { if (confirm("Discard all changes and start from the defaults?")) { loadSpec(S.defaultSpec, "defaults"); S.section = "batch"; render(); } });
+    const ext = () => (EXT[S.section] && EXT[S.section].json) || null;
+    $("#export-btn").addEventListener("click", () => {
+      const x = ext();
+      if (x) return download(`${x.name()}.json`, JSON.stringify(x.get(), null, 2));
+      download(`${S.spec.name || "batch"}.json`, JSON.stringify(S.spec, null, 2));
+    });
+    $("#reset-btn").addEventListener("click", () => {
+      const x = ext();
+      if (x) { if (confirm("Reset every RL setting to its default?")) x.reset(); return; }
+      if (confirm("Discard all changes and start from the defaults?")) { loadSpec(S.defaultSpec, "defaults"); S.section = "batch"; render(); }
+    });
     $("#json-btn").addEventListener("click", () => {
-      $("#json-text").value = JSON.stringify(S.spec, null, 2); $("#json-error").textContent = "";
+      const x = ext();
+      $("#json-title").textContent = x ? "RL training settings (JSON)" : "Spec JSON";
+      $("#json-text").value = JSON.stringify(x ? x.get() : S.spec, null, 2); $("#json-error").textContent = "";
       $("#json-dialog").showModal();
     });
     $("#json-apply").addEventListener("click", () => {
-      try { loadSpec(JSON.parse($("#json-text").value), "JSON"); $("#json-dialog").close(); }
-      catch (e) { $("#json-error").textContent = e.message; }
+      try {
+        const x = ext(), v = JSON.parse($("#json-text").value);
+        if (x) x.set(v, "JSON"); else loadSpec(v, "JSON");
+        $("#json-dialog").close();
+      } catch (e) { $("#json-error").textContent = e.message; }
     });
     $("#json-copy").addEventListener("click", async () => {
       try { await navigator.clipboard.writeText($("#json-text").value); toast("Copied", "ok"); } catch (_) { $("#json-text").select(); }
@@ -987,6 +1027,13 @@
     } catch (_) { /* optional */ }
   }
 
+  // ------------------------------------------------------------------ extension API (rl.js)
+  window.DriftSim = {
+    S, h, $, api, toast, store, clone, r6, debounce, fmtInt, fmtNum, fmtBytes, fmtDur, fmtDate, PALETTE,
+    numInput, drawChart, niceTicks, download, render, renderSidebar, renderContent, renderSummary, goTo,
+    register(id, ext) { EXT[id] = ext; },
+  };
+
   // ------------------------------------------------------------------ start
   async function init() {
     setupTopbar();
@@ -1010,6 +1057,8 @@
     pollJobs();
     setInterval(pollJobs, 1000);
     setInterval(() => { if (S.section === "runs") loadDatasets(); }, 5000);
+    for (const x of Object.values(EXT)) if (x.init) x.init();
   }
-  init();
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);   // after rl.js registered
+  else init();
 })();

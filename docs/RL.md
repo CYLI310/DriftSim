@@ -17,6 +17,29 @@ python -m rc_drift_sim.rl.ppo --task hold --envs 1024 --steps 20000000 --out run
 driftsim-train --task track --device mps --envs 8192 --out runs/track      # same, installed command
 ```
 
+## In the GUI
+
+`driftsim-gui` (or DriftSim.app / DriftSim.exe with PyTorch) has two RL pages:
+
+* **RL training**: every setting below with its unit and meaning (task, episode, targets, start,
+  rewards, observations and sensor noise, PPO, compute device, snapshots), validated as you type.
+  Domain randomization can use the variables you set on the dataset pages (Chassis, Tires, Surface,
+  Tire condition, Starting state, ...). The top-bar JSON, Save JSON, Import and Reset buttons work on
+  these settings while an RL page is open. Press **Start training** (further runs queue).
+* **RL runs**: every run in `rl_runs/` (next to `exports/`, or `driftsim-gui --runs DIR`). For the
+  selected run: progress and ETA, live learning curves (episode return against the reference
+  controllers, episode length, reward per step, action noise, value loss, KL), a **training
+  timeline** of episodes the policy drove during training (recorded every few iterations; the trail
+  is coloured by sideslip), and an **episode viewer** that animates any snapshot top-down with charts
+  of sideslip, speed, commands, the reward terms and yaw rate / line distance in sync. "Run latest
+  policy", "LQR reference" and "No input" simulate a fresh episode on demand (pick the seed and a
+  parked or drifting start). Stop ends training and keeps the last policy; Settings loads a run's
+  settings back into the editor; policy.pt and log.jsonl download directly.
+
+Each run folder holds `config.json` (the settings), `log.jsonl`, `policy.pt`, `status.json` and
+`snapshots/*.json` (`rl.visual.record_rollout` output: per-step pose, sideslip, speeds, commands,
+reward terms).
+
 ## Tasks
 
 | id | task | reward per step (max) | ends early when |

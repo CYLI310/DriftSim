@@ -36,6 +36,20 @@ def self_test() -> int:
         ok = res["status"] == "complete" and res["episodes_written"] == 16 and "all/episodes.csv" in res["files"]
         print(f"self-test: {res['status']}, {res['episodes_written']} episodes, {len(res['files'])} files, "
               f"devices {[d for d, on in available_devices().items() if on]}")
+    from rc_drift_sim.app.rl_runs import available
+    rl_ok, why = available()
+    if rl_ok:                                   # bundled PyTorch: one tiny PPO iteration end to end
+        from rc_drift_sim.rl import EnvConfig
+        from rc_drift_sim.rl.ppo import PPOConfig, train
+        from rc_drift_sim.rl.visual import record_rollout
+        model, hist = train(EnvConfig(task="hold", episode_s=0.5), PPOConfig(total_steps=256, num_envs=16, rollout=16,
+                                                                              epochs=1, minibatches=2), log=None)
+        ep = record_rollout(EnvConfig(task="hold", episode_s=0.5), model.act)
+        rl_ok = len(hist) == 1 and ep["steps"] > 0
+        print(f"self-test RL: {'ok' if rl_ok else 'FAILED'} (PPO iteration, recorded episode of {ep['steps']} steps)")
+        ok = ok and rl_ok
+    else:
+        print(f"self-test RL: off ({why})")
     print("self-test passed" if ok else "self-test FAILED")
     return 0 if ok else 1
 

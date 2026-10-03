@@ -20,20 +20,30 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install -e ".[dev]"
-      - run: python -m pytest -q
+      - run: python -m pytest -q -m "not benchmark"     # speed floors are not meaningful on shared CI machines
 
   executable:
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: datasets          # dataset GUI only, small
+            flags: ""
+            artifact: DriftSim-windows-x64
+          - variant: rl                # with PyTorch (CPU): RL training pages too
+            flags: "-WithTorch"
+            artifact: DriftSim-windows-x64-rl
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Build DriftSim.exe (CPU) and run its self-test
+      - name: Build DriftSim.exe (${{ matrix.variant }}) and run its self-test
         shell: pwsh
-        run: scripts/windows/build_exe.ps1
+        run: scripts/windows/build_exe.ps1 ${{ matrix.flags }}
       - uses: actions/upload-artifact@v4
         with:
-          name: DriftSim-windows-x64
+          name: ${{ matrix.artifact }}
           path: dist/DriftSim.zip
           if-no-files-found: error

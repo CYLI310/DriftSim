@@ -23,7 +23,7 @@ from ..control.maneuvers import LQR_ENTRY
 from ..sim.equilibrium import CTRL, solve_trim
 from ..sim.vehicle import Vehicle
 from ..sim.xp import to_numpy
-from .env import DriftBatchEnv
+from .env import DriftBatchEnv, mirror_state
 
 
 class LQRDriftBaseline:
@@ -43,16 +43,21 @@ class LQRDriftBaseline:
         self.mode = np.zeros(B, dtype=np.int64)          # 0 launch, 1 throttle stab, 2 LQR
         self.pending = np.tile(self.trim.u, (B, max(self.delay, 1), 1))
         self.last_id = np.full(B, -1)
+        self.side = np.ones(B)                          # -1: hold the mirror image (a right-hand drift)
 
     def __call__(self, env: DriftBatchEnv) -> np.ndarray:
         e, B = self.entry, env.num_envs
         s = to_numpy(env.state).astype(np.float64)
         t = to_numpy(env.t_step) * self.cdt
         new = env.episode_id != self.last_id               # a car started a new episode
-        self.mode[new] = 0
+        beta = np.degrees(np.arctan2(s[:, 4], s[:, 3]))          # sideslip atan2(vy, vx)
+        drifting = new & (np.abs(beta) > e["switch_beta_deg"]) & (np.hypot(s[:, 3], s[:, 4]) > 0.5)
+        self.mode[new] = np.where(drifting[new], 2, 0)    # an episode that starts in a drift: hold it at once
+        self.side[new] = np.where(drifting[new] & (beta[new] > 0), -1.0, 1.0)
         self.pending[new] = self.trim.u
         self.last_id = env.episode_id.copy()
-        beta = np.degrees(np.arctan2(s[:, 4], s[:, 3]))          # sideslip atan2(vy, vx)
+        s = np.where(self.side[:, None] < 0, mirror_state(s), s)
+        beta = beta * self.side
         self.mode[(self.mode == 0) & (t >= e["launch_s"])] = 1
         switch = (self.mode == 1) & ((beta < -e["switch_beta_deg"]) | (t >= e["launch_s"] + e["kick_max_s"]))
         self.pending[switch] = self.trim.u
@@ -69,6 +74,7 @@ class LQRDriftBaseline:
             u[lqr] = ul
             if self.delay:
                 self.pending[lqr] = np.concatenate([self.pending[lqr][:, 1:], ul[:, None]], axis=1)
+        u[:, 0] *= self.side                              # steer back from the mirror image
         return u
 
 
