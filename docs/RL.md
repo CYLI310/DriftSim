@@ -128,6 +128,33 @@ accepts a whole export spec (its `params` are used), so a spec saved from the GU
 The NumPy physics runs about 25k car-steps/s in one process; on the Apple M4 GPU about 64k at 8,192
 cars (see [DATA_GENERATION.md](DATA_GENERATION.md#gpu-acceleration) for the precision trade-off).
 
+## Safe, self-adapting sliding (the final model)
+
+`rl.presets.preset_body("safe-adaptive")` (GUI: Presets → Use; CLI: `driftsim-train --preset
+safe-adaptive`) turns on everything below. Each piece is also a plain setting.
+
+| setting | what it does |
+|---|---|
+| `EnvConfig.safety` (`deploy.safety.SafetyConfig`) | the safety filter between policy and car, identical on the car: rate limits, counter-steer and throttle cut beyond `beta_soft_deg`..`beta_hard_deg` of sideslip or a yaw rate above `yaw_margin` × grip × g / speed, speed limit `v_max`. It reads the same noisy sensors as the policy and the policy's grip estimate (`env.step(actions, grip=...)`). `RewardWeights.intervention` penalizes the change it made; `info["override"]` says how much it acted |
+| `EnvConfig.history` | the last N per-step readings (sensors + previous commands), oldest first, then the task features; a new episode fills the history with its first reading |
+| `EnvConfig.front_wheel_speeds` | `False`: the policy reads only the rear (driven) wheel speeds |
+| `grip_change_prob`, `grip_change_min/max` | a share of the episodes multiply the grip once, at a random time between 25 % and 75 % of the episode |
+| `target_beta_jitter_deg`, `target_speed_jitter` | per-episode commanded sideslip and speed (observed as before) |
+| `PPOConfig.grip_estimator` | an MLP estimates the friction coefficient (`info["grip"]`, the mean effective peak lateral μ of the four tires) from the observation by regression; its estimate (detached) is an input of the policy and goes to the safety filter |
+| `PPOConfig.privileged_critic` | the critic also sees `env.last_priv` (velocities, wheel speeds, steering angle, motor current, loads, slips, tire temperatures, true grip, latency) |
+| `PPOConfig.eval_every` | every N iterations `rl.evaluation.GripSweep` scores the deterministic policy on `eval_grip_levels` (surface grip multipliers; `eval_cars` cars each, parked start, nominal targets); the best becomes `best.pt` |
+| `PPOConfig.lr_schedule` | `linear` decays the learning rate to the end |
+
+The low-friction randomization of the preset (`rl.presets.LOW_FRICTION_RANDOMIZE`) draws one of three
+hard floors (epoxy P-tile, polished concrete, wet asphalt), scales its grip 0.3-1.3x and its stiffness
+0.7-1.2x, adds dust and wear, and varies mass, motor, steering offset and latency. With the plastic
+drift tires the peak friction coefficient spans about 0.09-0.46; drift equilibria at 30° and 1.5 m/s
+exist over that whole range, but the steering they need roughly doubles from the grippiest to the
+most slippery surface, which is what the policy has to adapt to.
+
+`rl.export` (`driftsim-export`) writes the final model; `rc_drift_sim.deploy` runs it on the car, in
+DriftSim or in BeamNG: [DEPLOY.md](DEPLOY.md).
+
 ## PPO trainer
 
 `rc_drift_sim.rl.ppo` (`driftsim-train`) is clipped PPO with GAE: Gaussian MLP policy (2 x 256, tanh),

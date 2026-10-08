@@ -935,6 +935,14 @@
     ctx.save(); ctx.beginPath(); ctx.rect(m.l, m.t, pw, ph); ctx.clip();
     ctx.lineWidth = 1.6; ctx.lineJoin = "round";
     for (const s of series) {
+      if (s.dots) {                                      // markers only (e.g. the best evaluations)
+        ctx.fillStyle = s.color;
+        for (let i = 0; i < s.x.length; i++) {
+          if (s.x[i] == null || s.y[i] == null) continue;
+          ctx.beginPath(); ctx.arc(X(s.x[i]), Y(s.y[i]), 3.5, 0, 2 * Math.PI); ctx.fill();
+        }
+        continue;
+      }
       ctx.strokeStyle = s.color; ctx.lineWidth = s.width || 1.6; ctx.setLineDash(s.dash || []); ctx.beginPath();
       let pen = false;
       for (let i = 0; i < s.x.length; i++) {

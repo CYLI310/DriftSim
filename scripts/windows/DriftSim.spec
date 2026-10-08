@@ -28,7 +28,10 @@ a = Analysis(
     pathex=[ROOT],
     datas=datas,
     hiddenimports=["rc_drift_sim.app.server", "rc_drift_sim.datagen.runner", "rc_drift_sim.sim.xp", "yaml"]
-    + (["rc_drift_sim.rl", "rc_drift_sim.rl.ppo", "rc_drift_sim.rl.visual", "rc_drift_sim.rl.catalog"] if WITH_TORCH else []),
+    + (["rc_drift_sim.rl", "rc_drift_sim.rl.ppo", "rc_drift_sim.rl.visual", "rc_drift_sim.rl.catalog",
+        "rc_drift_sim.rl.evaluation", "rc_drift_sim.rl.presets", "rc_drift_sim.rl.export", "rc_drift_sim.deploy",
+        "rc_drift_sim.deploy.safety", "rc_drift_sim.deploy.runtime", "rc_drift_sim.deploy.car_loop",
+        "rc_drift_sim.deploy.beamng"] if WITH_TORCH else []),
     excludes=excludes,
     noarchive=False,
     # keep the .py sources too: the variable catalog reads the units and descriptions from the

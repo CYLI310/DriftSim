@@ -15,7 +15,10 @@
     runs: [], runsSig: "", view: null, detail: null, hist: [], snapName: null, snap: null, follow: true,
     play: { t: 0, playing: false, speed: 1, last: 0, raf: 0 }, rows: {}, dash: null, sum: null,
   });
-  const PARTS = ["env", "noise", "reward", "ppo", "run"];
+  const PARTS = ["env", "noise", "reward", "safety", "ppo", "run"];
+  const ADAPT_ENV = ["history", "front_wheel_speeds", "grip_change_prob", "grip_change_min", "grip_change_max"];
+  const ADAPT_PPO = ["grip_estimator", "privileged_critic", "estimator_hidden", "estimator_coef"];
+  const EVAL_PPO = ["eval_every", "eval_cars", "eval_grip_levels"];
   const TASK_TEXT = {
     hold: "Hold a steady drift: sideslip near the target, either direction, with the car rotating into the slide, at the target speed. Position does not matter (a donut).",
     track: "Drive round a circle at the target speed, with a bonus for drifting into the turn. Straying too far from the line ends the episode.",
@@ -25,8 +28,8 @@
   // ------------------------------------------------------------------ settings
   function defaults() {
     const d = R.cat.defaults;
-    return { name: "drift", env: clone(d.env), noise: clone(d.noise), reward: clone(d.reward), ppo: clone(d.ppo), run: clone(d.run),
-      randomize_mode: "none", randomize: {} };
+    return { name: "drift", env: clone(d.env), noise: clone(d.noise), reward: clone(d.reward), safety: clone(d.safety), ppo: clone(d.ppo),
+      run: clone(d.run), randomize_mode: "none", randomize: {} };
   }
   function mergeCfg(c) {
     const out = defaults();
@@ -51,7 +54,7 @@
   }
   function body() {
     const c = R.cfg;
-    return { name: c.name, env: c.env, noise: c.noise, reward: c.reward, ppo: c.ppo, run: c.run,
+    return { name: c.name, env: c.env, noise: c.noise, reward: c.reward, safety: c.safety, ppo: c.ppo, run: c.run,
       randomize_mode: c.randomize_mode, randomize: randomizeDict() };
   }
   function changedCount() {
@@ -96,11 +99,11 @@
       const i = h("input", { type: "checkbox", checked: !!v, onchange: () => setVal(part, f.key, i.checked) });
       return h("label", { class: "switch" }, i, h("span"));
     }
-    if (f.type === "intlist") {
-      const i = h("input", { type: "text", value: (v || []).join(", "), style: "width:140px", "aria-label": f.label });
+    if (f.type === "intlist" || f.type === "floatlist") {
+      const i = h("input", { type: "text", value: (v || []).join(", "), style: "width:180px", "aria-label": f.label });
       i.addEventListener("input", () => {
         const vals = i.value.split(/[,\s]+/).filter(Boolean).map(Number);
-        const ok = vals.length && vals.every((x) => Number.isInteger(x) && x > 0);
+        const ok = vals.length && vals.every((x) => (f.type === "intlist" ? Number.isInteger(x) : Number.isFinite(x)) && x > 0);
         i.classList.toggle("invalid", !ok);
         if (ok) setVal(part, f.key, vals);
       });
@@ -142,8 +145,16 @@
           "The car learns to drift by trial and error: thousands of simulated cars drive at once, the PPO trainer rewards what worked, ",
           "and every few iterations the current policy drives one recorded episode. Set the parameters here, press Start training, ",
           "then watch the learning curves and the recorded episodes under ", h("a", { href: "#", onclick: (e) => { e.preventDefault(); go("rlruns"); } }, "RL runs"), ".")),
+      card("Presets", "Start from a ready-made setup, then adjust anything below.",
+        h("div", { class: "preset-list" }, (R.cat.presets || []).map((p) => h("div", { class: "preset" },
+          h("div", {}, h("b", {}, p.label), h("div", { class: "muted small" }, p.desc)),
+          h("button", { class: `btn small ${p.key === "safe-adaptive" ? "btn-primary" : ""}`, onclick: () => loadPreset(p) }, "Use"))))),
       card("Task", TASK_TEXT[task], h("div", { style: "margin-bottom:12px" }, taskSeg),
-        h("div", { class: "form-grid" }, fieldRows("env", (f) => !["task", "obs"].includes(f.key)))),
+        h("div", { class: "form-grid" }, fieldRows("env", (f) => !["task", "obs"].includes(f.key) && !ADAPT_ENV.includes(f.key)))),
+      card("Safety filter", "Sits between the policy and the car, in training as on the car: limits how fast the commands change, takes over with counter-steer and less throttle when the slide or the rotation leaves the envelope, and caps the speed. Its interventions are penalized, so the policy learns not to need it.",
+        h("div", { class: "form-grid" }, fieldRows("safety", (f) => f.key === "enabled" || c.safety.enabled))),
+      card("Self-adaptation to unknown grip", "The policy is not told the grip. It sees a short history of its sensors, a grip estimator learns the friction from the same history (the policy and the safety filter use its estimate), and the critic may see the true state during training.",
+        h("div", { class: "form-grid" }, fieldRows("env", (f) => ADAPT_ENV.includes(f.key)), fieldRows("ppo", (f) => ADAPT_PPO.includes(f.key)))),
       card("Rewards", `Per-step reward (at most ${fmtNum(maxStep)} per step, ${fmtNum(maxStep * c.env.episode_s * 50)} per episode) minus the smoothness penalty; ending early costs the early-end penalty.`,
         h("div", { class: "form-grid" }, fieldRows("reward"))),
       card("Observations & sensor noise", "What the policy sees. With sensors it gets gyro, accelerometer, wheel speeds and a velocity estimate, each with Gaussian noise, like the real car.",
@@ -157,9 +168,16 @@
             : h("div", { class: "status-line warn" }, "No variables are set on the dataset pages yet: open Chassis, Tires, Surface, … and set some to random."),
         c.randomize_mode === "custom" ? h("div", { style: "margin-top:10px" }, h("button", { class: "btn small", onclick: copyToDataset }, "Copy into the dataset pages to edit")) : null),
       card("PPO trainer", S.advanced ? null : "Tick Advanced (top) for epochs, minibatches, GAE lambda, clipping and the other fine-tuning settings.",
-        h("div", { class: "form-grid" }, fieldRows("ppo"))),
+        h("div", { class: "form-grid" }, fieldRows("ppo", (f) => !ADAPT_PPO.includes(f.key) && !EVAL_PPO.includes(f.key)))),
+      card("Final model selection", "Every few iterations the policy drives a sweep of grip levels (parked start, nominal targets, the rest randomized as in training). The best-scoring policy is kept as best.pt and becomes the final model you export.",
+        h("div", { class: "form-grid" }, fieldRows("ppo", (f) => EVAL_PPO.includes(f.key)))),
       card("Compute", "Where the cars are simulated and the network is trained. The CPU uses the exact NumPy physics; a GPU pays off from a few thousand cars.",
         h("div", { class: "form-grid" }, fieldRows("run"))));
+  }
+  function loadPreset(p) {
+    R.cfg = mergeCfg(p.body); save(); validate();
+    toast(`Loaded preset: ${p.label}`, "ok");
+    D.render(); updateSum();
   }
   function copyToDataset() {
     if (!confirm("Replace the variables on the dataset pages with this run's randomization?")) return;
@@ -317,6 +335,10 @@
     { title: "Action noise (std): steer, throttle", key: "std" },
     { title: "Value loss", key: "vloss" },
     { title: "Policy change per iteration (approx. KL)", key: "kl" },
+    { title: "Spin-outs (share of finished episodes)", key: "spin" },
+    { title: "Safety filter takes over (share of steps)", key: "over" },
+    { title: "Grip estimate error (mean |estimate − true|)", key: "grip" },
+    { title: "Grip-sweep evaluation score (● = new best)", key: "eval" },
   ];
   function buildDash() {
     if (!R.dash || !R.view) return;
@@ -342,8 +364,15 @@
     d.seed = h("input", { type: "number", value: 0, style: "width:70px", "aria-label": "Seed" });
     d.startSel = h("select", { "aria-label": "Start" }, h("option", { value: "parked" }, "start parked"), h("option", { value: "drift" }, "start drifting"));
     d.follow = h("input", { type: "checkbox", checked: R.follow, onchange: () => { R.follow = d.follow.checked; } });
-    d.lqrBtn = h("button", { class: "btn small", onclick: () => liveRollout("lqr"), title: "The model-based reference controller (hold task)" }, "LQR reference");
-    d.epCharts = [h("canvas"), h("canvas"), h("canvas"), h("canvas"), h("canvas")];
+    d.lqrBtn = h("button", { class: "btn small", onclick: () => liveRollout("lqr"), title: "The model-based reference controller (hold task; tuned for the nominal car)" }, "LQR reference");
+    d.grip = h("input", { type: "number", step: "0.05", min: "0.05", max: "3", placeholder: "random", style: "width:80px", "aria-label": "Surface grip multiplier",
+      title: "surface grip multiplier (1 = P-tile, peak μ ≈ 0.42 × this with plastic tires); empty = random as in training" });
+    d.gripChange = h("input", { type: "text", placeholder: "e.g. 0.6@4", style: "width:80px", "aria-label": "Grip change",
+      title: "multiply the grip by FACTOR after SECONDS, e.g. 0.6@4 = a wet patch after 4 s" });
+    d.final = h("div");
+    d.bng = buildBeamng();
+    d.exportBtn = h("button", { class: "btn btn-primary", onclick: exportFinal }, "Export final model");
+    d.epCharts = [h("canvas"), h("canvas"), h("canvas"), h("canvas"), h("canvas"), h("canvas")];
     d.epTitles = d.epCharts.map(() => h("h4"));
     d.epLegends = d.epCharts.map(() => h("div", { class: "legend", style: "margin:2px 0 4px" }));
     R.dashEls = d;
@@ -356,13 +385,19 @@
       h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Learning curves"),
         h("span", { class: "muted small" }, "x: environment steps (millions); dashed: reference controllers")),
         h("div", { class: "charts" }, LEARN.map((c, i) => h("div", { class: "chart" }, h("h4", {}, c.title), d.curves[i])))),
+      h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Final model"), d.exportBtn),
+        h("p", { class: "muted small", style: "margin-top:0" }, "The final model is best.pt (the best grip-sweep score), or the latest policy if the run has no evaluation. Export writes final/ (policy.json, policy.npz, policy.onnx, policy_ts.pt) and final_model.zip, checks every format against the trained network, then drives the exported model through the on-car runtime in DriftSim at three grip levels."),
+        d.final),
+      d.bng.card,
       h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Training timeline"),
         h("label", { class: "toggle small" }, d.follow, h("span", {}, "follow the newest snapshot"))),
         h("p", { class: "muted small", style: "margin-top:0" }, "One recorded episode of the policy every few iterations (deterministic actions, the car starts parked). Click one to play it below. Trail colour: blue grip, orange drift, red spin."),
         d.timeline),
       h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Episode viewer"),
         h("div", { class: "row-actions" }, h("span", { class: "muted small" }, "seed"), d.seed, d.startSel,
-          h("button", { class: "btn small", onclick: () => liveRollout("policy") }, "Run latest policy"), d.lqrBtn,
+          h("span", { class: "muted small" }, "grip"), d.grip, h("span", { class: "muted small" }, "change"), d.gripChange,
+          h("button", { class: "btn small", onclick: () => liveRollout("policy") }, "Run latest policy"),
+          h("button", { class: "btn small", onclick: () => liveRollout("best") }, "Run best policy"), d.lqrBtn,
           h("button", { class: "btn small", onclick: () => liveRollout("zero") }, "No input"))),
         d.snapLabel,
         h("div", { class: "viewer" }, d.scene, d.hud),
@@ -396,6 +431,139 @@
       ...refs.map(([k, v], i) => h("span", { class: "chip small", style: `border-color:${PALETTE[(i + 2) % PALETTE.length]}` }, `${k}: ${v}`))] : []));
     drawCurves();
     updateTimeline();
+    updateFinal();
+    updateBeamng();
+  }
+  // ------------------------------------------------------------------ BeamNG test drive of the exported model
+  const BNG_KEY = "driftsim.beamng.v1";
+  const BNG_FIELDS = [
+    ["home", "BeamNG folder", "text", "the BeamNG.drive (Steam) or BeamNG.tech install folder", "300px"],
+    ["vehicle", "Vehicle", "text", "BeamNG model name, e.g. etk800; use a rear-drive car", "120px"],
+    ["part_config", "Configuration", "text", "optional .pc path of a rear-drive / drift setup with slippery tires", "300px"],
+    ["level", "Map", "text", "smallgrid: an endless flat grid", "120px"],
+    ["seconds", "Duration", "number", "seconds of BeamNG time", "80px"],
+    ["beta", "Sideslip command", "number", "deg, within the trained range", "80px"],
+    ["speed", "Speed command", "number", "m/s of the RC car (scaled up for BeamNG)", "80px"],
+    ["scale", "Scale", "text", "auto: BeamNG car length / RC car length; 1 for an RC-size mod", "80px"],
+    ["steer_lock_deg", "Steering lock", "number", "road-wheel angle (deg) at full BeamNG steering; empty = as trained", "80px"],
+    ["throttle_gain", "Throttle gain", "number", "BeamNG throttle per unit policy throttle (an engine is not an RC motor)", "80px"],
+  ];
+  function buildBeamng() {
+    let saved = store.get(BNG_KEY) || {};
+    const defaults = { vehicle: "etk800", level: "smallgrid", seconds: 20, scale: "auto", throttle_gain: 1 };
+    const inputs = {};
+    const rows = BNG_FIELDS.map(([k, label, type, desc, width]) => {
+      const i = h("input", { type, value: saved[k] ?? (k === "home" ? (R.beamng && R.beamng.home) || "" : defaults[k] ?? ""), style: `width:${width}`, "aria-label": label });
+      i.addEventListener("input", () => { saved = { ...saved, [k]: i.value }; store.set(BNG_KEY, saved); });
+      inputs[k] = i;
+      return [h("label", { title: desc }, label), h("div", { class: "ctl" }, i, h("span", { class: "muted small rl-desc" }, desc))];
+    });
+    const el = { inputs, status: h("div"), start: h("button", { class: "btn btn-primary", onclick: startBeamng }, "Test in BeamNG"),
+      stop: h("button", { class: "btn btn-danger", onclick: stopBeamng, hidden: true }, "Stop") };
+    const info = R.beamng || {};
+    el.card = h("div", { class: "card" },
+      h("div", { class: "card-head" }, h("h2", {}, "Test in BeamNG"), h("div", { class: "row-actions" }, el.start, el.stop)),
+      h("p", { class: "muted small", style: "margin-top:0" },
+        "Drives the exported model (the same runtime and safety filter as on the car) in BeamNG on this PC. A full-size car is driven at the RC car's Froude number: speeds ÷ √scale, yaw rates × √scale. BeamNG starts by itself (the first start takes a minute). Pick a rear-drive car with slippery tires: the policy learned low grip. See docs/DEPLOY.md."),
+      !info.beamngpy ? h("div", { class: "status-line warn" }, "beamngpy is not installed in this Python: pip install beamngpy (the version that matches your BeamNG), then restart the GUI.") : null,
+      info.beamngpy && !info.home ? h("div", { class: "status-line warn" }, "BeamNG was not found automatically: enter its install folder below.") : null,
+      h("div", { class: "form-grid", style: "margin-top:8px" }, rows), el.status);
+    return el;
+  }
+  function bngBody() {
+    const i = R.dashEls.bng.inputs, num = (k) => (i[k].value === "" ? null : Number(i[k].value));
+    return { home: i.home.value.trim(), vehicle: i.vehicle.value.trim(), part_config: i.part_config.value.trim(), level: i.level.value.trim(),
+      seconds: num("seconds"), beta: num("beta"), speed: num("speed"), scale: i.scale.value.trim() === "auto" ? "auto" : num("scale"),
+      steer_lock_deg: num("steer_lock_deg"), throttle_gain: num("throttle_gain") };
+  }
+  async function startBeamng() {
+    try { await api("POST", `/api/rl/runs/${encodeURIComponent(R.view)}/beamng`, bngBody()); toast("Starting BeamNG…", "ok"); pollView(); }
+    catch (e) { toast(e.message, "bad"); }
+  }
+  async function stopBeamng() {
+    try { await api("POST", `/api/rl/runs/${encodeURIComponent(R.view)}/beamng`, { action: "stop" }); } catch (e) { toast(e.message, "bad"); }
+  }
+  function updateBeamng() {
+    const d = R.dashEls, x = R.detail;
+    if (!d || !x || !d.bng) return;
+    const b = x.beamng, el = d.bng, active = b && (b.status === "starting" || b.status === "driving");
+    el.start.disabled = !x.export || active;
+    el.start.title = x.export ? "" : "export the final model first";
+    el.stop.hidden = !active;
+    if (!b) { el.status.replaceChildren(x.export ? "" : h("div", { class: "muted small" }, "Export the final model first.")); return; }
+    const L = b.last || {}, sm = b.summary;
+    el.status.replaceChildren(
+      h("div", { class: `status-line ${b.status === "failed" ? "bad" : b.status === "complete" ? "ok" : ""}`, style: "margin-top:10px" },
+        active ? h("span", { class: "spinner" }) : null,
+        h("div", {}, h("b", {}, `BeamNG test: ${b.status}`), b.error ? h("div", { class: "small" }, b.error) : null,
+          b.status === "driving" && b.last ? h("div", { class: "small mono" },
+            `t ${L.t} s · RC-equivalent speed ${L.true_speed ?? "–"} m/s (BeamNG ${L.true_speed_beamng ?? "–"} m/s) · sideslip ${L.true_beta_deg ?? "–"}° · cmd ${L.steer} / ${L.throttle} · grip est ${L.grip_est ?? "–"} · safety ${L.override}`) : null)),
+      b.messages && b.messages.length ? h("pre", { class: "small mono", style: "white-space:pre-wrap;max-height:160px;overflow:auto" }, b.messages.join("\n")) : null,
+      sm ? h("div", { class: "small" }, h("b", {}, "Result: "),
+        `${sm.seconds} s (RC time), mean |sideslip| ${sm.mean_abs_beta_deg_2nd_half}° in the second half (command ${sm.target_beta_deg}°), speed ${sm.mean_speed_2nd_half} m/s (command ${sm.target_speed}), safety filter acted on ${(100 * sm.override_share).toFixed(1)} % of steps${sm.ended_early ? ", ended early" : ""}. Log: `, h("span", { class: "mono" }, b.log)) : null);
+  }
+  function evalTable(ev) {
+    const pct = (v) => (v == null ? "–" : `${(100 * v).toFixed(1)} %`);
+    return h("table", { class: "data" },
+      h("thead", {}, h("tr", {}, ...["grip level", "true μ", "return", "spin-outs", "safety takes over", "|β| error", "speed error", "grip est. error"]
+        .map((t, i) => h("th", { class: i ? "num" : "" }, t)))),
+      h("tbody", {}, ev.levels.map((l) => h("tr", {}, h("td", {}, `× ${l.level}`), h("td", { class: "num" }, fmtNum(l.grip)),
+        h("td", { class: "num" }, fmtNum(l.mean_return)), h("td", { class: "num" }, pct(l.spin_share)), h("td", { class: "num" }, pct(l.override_share)),
+        h("td", { class: "num" }, l.beta_error_deg == null ? "–" : `${l.beta_error_deg}°`), h("td", { class: "num" }, l.speed_error == null ? "–" : `${l.speed_error} m/s`),
+        h("td", { class: "num" }, l.grip_error == null ? "–" : fmtNum(l.grip_error))))));
+  }
+  function updateFinal() {
+    const d = R.dashEls, x = R.detail;
+    if (!d || !x) return;
+    const sig = JSON.stringify([x.best_eval, x.best_iteration, x.export, R.exporting]);
+    if (sig === d.finalSig) return;
+    d.finalSig = sig;
+    d.exportBtn.disabled = !!R.exporting || !x.iteration;
+    d.exportBtn.textContent = R.exporting ? "Exporting…" : (x.export ? "Export again" : "Export final model");
+    const kids = [];
+    if (x.best_eval) kids.push(h("div", { class: "small", style: "margin-bottom:6px" },
+      h("b", {}, `Best so far: iteration ${x.best_iteration}, score ${fmtNum(x.best_eval.score)}`),
+      ` · spin-outs ${(100 * x.best_eval.spin_share).toFixed(1)} % · safety takes over ${(100 * x.best_eval.override_share).toFixed(1)} % of steps`),
+      h("div", { style: "overflow-x:auto" }, evalTable(x.best_eval)));
+    else {
+      const every = ((x.config || {}).ppo || {}).eval_every;
+      kids.push(h("div", { class: "muted small" }, every ? `No grip-sweep evaluation yet: the first one runs after iteration ${every}.`
+        : "This run has no grip-sweep evaluation (turn on “Evaluate every” under Final model selection); the export uses the latest policy."));
+    }
+    const e = x.export;
+    if (e) {
+      const ok = e.checks && e.checks.ok;
+      kids.push(h("div", { class: `status-line ${ok ? "ok" : "bad"}`, style: "margin-top:12px" },
+        h("div", {}, h("b", {}, `Exported ${fmtDate(e.exported)} from ${e.source} (iteration ${e.iteration ?? "–"})`),
+          h("div", { class: "small" }, ok ? "✓ NumPy, TorchScript" + (e.files.includes("policy.onnx") ? ", ONNX" : "") + " match the trained network"
+            : `format check failed: ${JSON.stringify(e.checks)}`),
+          e.checks && e.checks.onnx_note ? h("div", { class: "small" }, e.checks.onnx_note) : null)));
+      if (e.sil) kids.push(h("div", { style: "overflow-x:auto;margin-top:8px" }, h("table", { class: "data" },
+        h("thead", {}, h("tr", {}, ...["on-car runtime in DriftSim", "true μ", "grip estimate", "|β| (2nd half)", "speed", "safety", "ended early", "max compute"].map((t, i) => h("th", { class: i ? "num" : "" }, t)))),
+        h("tbody", {}, e.sil.map((r) => h("tr", {}, h("td", {}, `grip × ${r.grip_level}`), h("td", { class: "num" }, fmtNum(r.grip_true_2nd_half)),
+          h("td", { class: "num" }, r.grip_estimate_2nd_half == null ? "–" : fmtNum(r.grip_estimate_2nd_half)),
+          h("td", { class: "num" }, `${r.mean_abs_beta_deg_2nd_half}° (target ${r.target_beta_deg}°)`), h("td", { class: "num" }, `${r.mean_speed_2nd_half} m/s`),
+          h("td", { class: "num" }, `${(100 * r.override_share).toFixed(1)} %`), h("td", { class: "num" }, r.ended_early ? "spun" : "no"),
+          h("td", { class: "num" }, `${r.max_compute_ms} ms`)))))));
+      kids.push(h("div", { class: "row-actions", style: "margin-top:10px" },
+        h("a", { class: "btn small btn-primary", href: `/api/rl/runs/${encodeURIComponent(R.view)}/files/final_model.zip` }, "Download final_model.zip"),
+        h("a", { class: "btn small", href: `/api/rl/runs/${encodeURIComponent(R.view)}/files/best.pt` }, "best.pt"),
+        h("button", { class: "btn small", onclick: () => api("POST", `/api/rl/runs/${encodeURIComponent(R.view)}/reveal`, {}).catch((er) => toast(er.message, "bad")) }, "Open folder")));
+      kids.push(h("p", { class: "muted small" }, "Next: test it in BeamNG on the Windows PC (",
+        h("code", {}, "driftsim-drive --model final --car beamng --beamng-home <BeamNG folder>"), "), then on the car (",
+        h("code", {}, "driftsim-drive --model final --car yourmodule:YourCar"), "). See docs/DEPLOY.md."));
+    }
+    d.final.replaceChildren(...kids);
+  }
+  async function exportFinal() {
+    R.exporting = true; updateFinal();
+    try {
+      await api("POST", `/api/rl/runs/${encodeURIComponent(R.view)}/export`, { which: "auto" });
+      toast("Final model exported and checked", "ok");
+      const dd = await api("GET", `/api/rl/runs/${encodeURIComponent(R.view)}?since=999999999`);
+      if (R.detail) R.detail.export = dd.export;
+    } catch (e) { toast(e.message, "bad"); }
+    R.exporting = false; updateFinal();
   }
   function series(key) {
     const H = R.hist, xs = H.map((r) => r.env_steps / 1e6);
@@ -406,6 +574,15 @@
     if (key === "std") return [{ x: xs, y: pick((r) => r.action_std && r.action_std[0]), color: PALETTE[0] },
       { x: xs, y: pick((r) => r.action_std && r.action_std[1]), color: PALETTE[1] }];
     if (key === "vloss") return [{ x: xs, y: pick((r) => r.value_loss), color: PALETTE[0] }];
+    if (key === "spin") return [{ x: xs, y: pick((r) => r.spin_share ?? null), color: PALETTE[3] }];
+    if (key === "over") return [{ x: xs, y: pick((r) => r.override_share ?? null), color: PALETTE[1] }];
+    if (key === "grip") return [{ x: xs, y: pick((r) => r.grip_error ?? null), color: PALETTE[4] }];
+    if (key === "eval") {
+      const E = H.filter((r) => r.eval);
+      const ex = E.map((r) => r.env_steps / 1e6);
+      return [{ x: ex, y: E.map((r) => r.eval.score), color: PALETTE[0] },
+        { x: ex, y: E.map((r) => (r.eval.best ? r.eval.score : null)), color: PALETTE[2], dots: true, width: 0 }];
+    }
     return [{ x: xs, y: pick((r) => r.approx_kl), color: PALETTE[0] }];
   }
   function drawCurves() {
@@ -458,11 +635,19 @@
     const d = R.dashEls;
     d.snapLabel.textContent = "Simulating one episode…";
     try {
+      const grip = d.grip.value === "" ? null : Number(d.grip.value);
+      let change = null;
+      if (d.gripChange.value.trim()) {
+        const m = d.gripChange.value.trim().match(/^([\d.]+)\s*@\s*([\d.]+)$/);
+        if (!m) throw new Error("grip change: write FACTOR@SECONDS, e.g. 0.6@4");
+        change = [Number(m[1]), Number(m[2])];
+      }
       const data = await api("POST", `/api/rl/runs/${encodeURIComponent(R.view)}/rollout`,
-        { policy, seed: Number(d.seed.value) || 0, init_drift: d.startSel.value === "drift" });
+        { policy, seed: Number(d.seed.value) || 0, init_drift: d.startSel.value === "drift", grip, grip_change: change });
       R.follow = false; d.follow.checked = false;
-      const who = { policy: "Latest policy", lqr: "LQR reference controller (reads the true state)", zero: "No input" }[policy];
-      showEpisode(data, null, `${who}, seed ${Number(d.seed.value) || 0}, ${d.startSel.value === "drift" ? "starting in a drift" : "starting parked"}: return ${fmtNum(data.episode_return)}, ${describeEnd(data)}.`);
+      const who = { policy: "Latest policy", best: "Best policy (best.pt)", lqr: "LQR reference controller (reads the true state)", zero: "No input" }[policy];
+      const g = grip == null ? "random grip" : `grip × ${grip}` + (change ? `, then × ${change[0]} at ${change[1]} s` : "");
+      showEpisode(data, null, `${who}, seed ${Number(d.seed.value) || 0}, ${g}, ${d.startSel.value === "drift" ? "starting in a drift" : "starting parked"}: return ${fmtNum(data.episode_return)}, ${describeEnd(data)}.`);
     } catch (e) { d.snapLabel.textContent = e.message; toast(e.message, "bad"); }
   }
   const describeEnd = (d) => d.ended === "time limit" ? `drove the full ${(d.steps * d.dt).toFixed(1)} s` : `ended by ${d.ended} after ${(d.steps * d.dt).toFixed(2)} s`;
@@ -518,7 +703,9 @@
     d.hud.replaceChildren(...[
       `t ${s.t[i].toFixed(2)} s`, `v ${s.speed[i].toFixed(2)} m/s`, `β ${s.beta_deg[i].toFixed(1)}°`, `r ${s.yaw_rate_deg_s[i].toFixed(0)}°/s`,
       `δ ${s.delta_deg[i].toFixed(1)}°`, s.steer.length ? `cmd ${s.steer[k].toFixed(2)} ${s.throttle[k].toFixed(2)}` : "",
-      s.reward.length ? `reward ${s.reward[k].toFixed(2)}` : ""].filter(Boolean).map((t) => h("div", {}, t)));
+      s.reward.length ? `reward ${s.reward[k].toFixed(2)}` : "",
+      s.grip_true && s.grip_true.length ? `μ ${s.grip_true[k].toFixed(2)}${s.grip_est && s.grip_est[k] != null ? ` est ${s.grip_est[k].toFixed(2)}` : ""}` : "",
+      s.override && s.override[k] > 0.01 ? `SAFETY ${s.override[k].toFixed(2)}` : ""].filter(Boolean).map((t) => h("div", {}, t)));
     if (charts) drawEpisodeCharts(s.t[i]);
   }
   function drawEpisodeCharts(tNow) {
@@ -528,13 +715,20 @@
       { title: "Sideslip (deg)", ser: [{ x: s.t, y: s.beta_deg, color: PALETTE[0], name: "sideslip" }],
         hl: e.task === "hold" ? [{ y: e.target_beta_deg, color: PALETTE[3] }, { y: -e.target_beta_deg, color: PALETTE[3] }] : [] },
       { title: "Speed (m/s)", ser: [{ x: s.t, y: s.speed, color: PALETTE[0], name: "speed" }], hl: [{ y: e.target_speed, color: PALETTE[3] }] },
-      { title: "Commands", ser: [{ x: ta, y: s.steer, color: PALETTE[0], name: "steer" }, { x: ta, y: s.throttle, color: PALETTE[1], name: "throttle" }], hl: [0] },
+      { title: e.safety ? "Commands (solid: sent to the car, dashed: what the policy asked)" : "Commands",
+        ser: [{ x: ta, y: s.steer, color: PALETTE[0], name: "steer" }, { x: ta, y: s.throttle, color: PALETTE[1], name: "throttle" },
+          ...(e.safety && s.raw_steer ? [{ x: ta, y: s.raw_steer, color: PALETTE[0], name: "policy steer", dash: [3, 3] },
+            { x: ta, y: s.raw_throttle, color: PALETTE[1], name: "policy throttle", dash: [3, 3] }] : [])], hl: [0] },
       { title: "Reward per step and its terms", ser: [{ x: ta, y: s.reward, color: PALETTE[2], name: "reward", width: 2 },
         ...(e.task === "hold" ? [["r_beta", "sideslip term"], ["r_speed", "speed term"]] : [["r_track", "line term"], ["r_speed", "speed term"], ["r_drift", "drift term"]])
           .map(([k, n], j) => ({ x: ta, y: s[k], color: PALETTE[[0, 1, 4][j]], name: n, dash: [3, 3] }))], hl: [0] },
       e.task === "track"
         ? { title: "Distance from the line (m, + = left)", ser: [{ x: ta, y: s.track_error, color: PALETTE[0], name: "track error" }], hl: [0] }
         : { title: "Yaw rate (deg/s)", ser: [{ x: s.t, y: s.yaw_rate_deg_s, color: PALETTE[0], name: "yaw rate" }], hl: [0] },
+      { title: "Grip: true μ vs the policy's estimate; safety takeover", ser: [
+        ...(s.grip_true ? [{ x: ta, y: s.grip_true, color: PALETTE[0], name: "true μ", width: 2 }] : []),
+        ...(s.grip_est && s.grip_est.some((v) => v != null) ? [{ x: ta, y: s.grip_est, color: PALETTE[4], name: "estimate" }] : []),
+        ...(s.override ? [{ x: ta, y: s.override, color: PALETTE[3], name: "safety (0–1)", dash: [3, 3] }] : [])], hl: [0] },
     ];
     defs.forEach((c, i) => {
       d.epTitles[i].textContent = c.title;
@@ -651,7 +845,7 @@
   async function init() {
     try {
       const c = await api("GET", "/api/rl/catalog");
-      R.available = c.available; R.reason = c.reason; R.devices = c.devices; R.root = c.runs_root;
+      R.available = c.available; R.reason = c.reason; R.devices = c.devices; R.root = c.runs_root; R.beamng = c.beamng;
       if (c.available) {
         R.cat = c.catalog;
         R.cfg = mergeCfg(store.get(KEY));
