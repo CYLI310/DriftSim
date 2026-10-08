@@ -20,14 +20,17 @@ torch = pytest.importorskip("torch")
 def test_catalog_covers_every_field_with_the_dataclass_defaults():
     from rc_drift_sim.rl.ppo import PPOConfig
     cat = catalog()
-    env_keys = {f.name for f in dataclasses.fields(EnvConfig)} - {"noise", "reward", "randomize"}
+    from rc_drift_sim.deploy.safety import SafetyConfig
+    env_keys = {f.name for f in dataclasses.fields(EnvConfig)} - {"noise", "reward", "randomize", "safety"}
     assert {f["key"] for f in cat["env"]} == env_keys
+    assert {f["key"] for f in cat["safety"]} == {f.name for f in dataclasses.fields(SafetyConfig)}
     assert {f["key"] for f in cat["reward"]} == {f.name for f in dataclasses.fields(RewardWeights)}
     assert {f["key"] for f in cat["noise"]} == set(EnvConfig().noise)
     assert {f["key"] for f in cat["ppo"]} == {f.name for f in dataclasses.fields(PPOConfig)}
     assert dataclasses.asdict(PPOConfig()) == PPO_DEFAULTS, "catalog.PPO_DEFAULTS must match ppo.PPOConfig"
+    assert [p["key"] for p in cat["presets"]][0] == "safe-adaptive"
     assert cat["defaults"]["env"]["target_beta_deg"] == EnvConfig().target_beta_deg
-    for part in ("env", "noise", "reward", "ppo", "run"):
+    for part in ("env", "noise", "reward", "safety", "ppo", "run"):
         for f in cat[part]:
             assert f["label"] and f["desc"], f"{part}.{f['key']} needs a label and a description"
 

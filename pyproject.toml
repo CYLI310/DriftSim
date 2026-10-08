@@ -6,14 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "rc_drift_sim"
 version = "0.1.0"
 description = "Vectorized 2D vehicle dynamics simulator for a 1/10-scale RC drift car"
-requires-python = ">=3.11"
+requires-python = ">=3.10"            # 3.10: Jetson (JetPack 6) and NVIDIA's PyTorch wheels
 dependencies = [
   "numpy",
   "scipy",
   "pyyaml",
   "matplotlib",
   "gymnasium",
-  "jax",
 ]
 
 [project.optional-dependencies]
@@ -21,11 +20,17 @@ dev = ["pytest", "pyflakes", "pygame"]
 # GPU-accelerated batch data generation (Apple MPS or NVIDIA CUDA); for CUDA install the wheel
 # matching your driver from https://pytorch.org first
 gpu = ["torch>=2.4"]
+# exporting the final model as ONNX (TensorRT / onnxruntime on the car)
+export = ["onnx", "onnxscript", "onnxruntime"]
+# testing the final model in BeamNG (BeamNG.tech; the Steam BeamNG.drive only in part)
+beamng = ["beamngpy"]
 
 [project.scripts]
 driftsim-datagen = "rc_drift_sim.datagen.__main__:main"
 driftsim-gui = "rc_drift_sim.app.__main__:main"
 driftsim-train = "rc_drift_sim.rl.ppo:main"
+driftsim-export = "rc_drift_sim.rl.export:main"
+driftsim-drive = "rc_drift_sim.deploy.car_loop:main"
 
 [tool.setuptools.packages.find]
 include = ["rc_drift_sim*"]

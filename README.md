@@ -155,6 +155,18 @@ driftsim-train --task hold --envs 1024 --steps 20000000 --out runs/hold        #
 
 Tasks, observations, rewards, randomization and reference scores: [docs/RL.md](docs/RL.md).
 
+**The final model: safe, self-adapting sliding on unknown low-friction surfaces.** One preset trains
+it (GUI: RL training → Presets, or the command below): a safety filter shared by training and the car,
+a 16-step sensor history with a learned grip estimate, unknown and changing grip, and the best policy
+on a grip sweep kept. Export it, check it in DriftSim and BeamNG, then drive the car (Jetson Orin Nano)
+with the same runtime: [docs/DEPLOY.md](docs/DEPLOY.md).
+
+```bash
+driftsim-train --preset safe-adaptive --device cuda --out rl_runs/final --export   # Jetson or NVIDIA PC
+driftsim-drive --model rl_runs/final/final --car sim --grip 0.4 --grip-change 0.6@5
+driftsim-drive --model final_model.zip --car beamng            # on the Windows PC with BeamNG
+```
+
 ## Generate datasets from the command line
 
 ```bash
@@ -219,16 +231,20 @@ DriftSim/
 │   ├── control/           open-loop maneuvers and the LQR drift controller
 │   ├── datagen/           batch dataset generation (driftsim-datagen)
 │   ├── app/               web GUI (driftsim-gui): local server and the page in static/
-│   ├── rl/                Gymnasium environments, rewards, reference controllers, PPO (driftsim-train)
+│   ├── rl/                Gymnasium environments, rewards, reference controllers, PPO (driftsim-train),
+│   │                      presets, grip-sweep evaluation, final-model export (driftsim-export)
+│   ├── deploy/            on-car runtime, safety filter, 50 Hz loop (driftsim-drive) with DriftSim,
+│   │                      BeamNG and hardware drivers
 │   └── viz/               top-down renderer, animations, time-series plots
 ├── examples/              quickstart.py, batch_export.py, specs/*.json ready-made datasets
 ├── scripts/               driftsim-gui.sh (start / stop the GUI), mac/ (DriftSim.app launcher),
 │                          windows/ (DriftSim.exe build, Start DriftSim.bat), bench_devices.py,
-│                          make_figures.py, tune_drift.py, make_param_reference.py
+│                          make_figures.py, tune_drift.py, make_param_reference.py, jetson/ (setup)
 ├── tests/                 pytest suite
 └── docs/
     ├── DATA_GENERATION.md how to make datasets
     ├── RL.md              the reinforcement-learning environments and trainer
+    ├── DEPLOY.md          Jetson training, export, BeamNG test, driving the real car
     ├── PARAMETERS.md      every variable with default, unit and description (generated)
     ├── DESIGN.md          the physics model: conventions, equations, module contracts, findings
     └── images/            figures used here
@@ -257,5 +273,6 @@ python scripts/make_param_reference.py --check
 
 - [docs/DATA_GENERATION.md](docs/DATA_GENERATION.md): generating datasets
 - [docs/RL.md](docs/RL.md): reinforcement-learning environments, rewards and the PPO trainer
+- [docs/DEPLOY.md](docs/DEPLOY.md): training on the Jetson, exporting, BeamNG, the real car
 - [docs/PARAMETERS.md](docs/PARAMETERS.md): every variable, maneuver and exportable signal
 - [docs/DESIGN.md](docs/DESIGN.md): the physics model in depth

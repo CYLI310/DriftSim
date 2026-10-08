@@ -53,6 +53,12 @@ from ..sim.xp import available_devices
 from ..datagen.runner import SpecError, default_out_root
 from .rl_runs import RLManager, available as rl_available
 
+
+def beamng_info() -> dict:
+    """Whether BeamNG tests can run on this machine: beamngpy installed, BeamNG found (for the GUI)."""
+    from ..deploy.beamng import beamngpy_installed, find_beamng_home
+    return dict(beamngpy=beamngpy_installed(), home=find_beamng_home())
+
 STATIC = Path(__file__).resolve().parent / "static"
 EXAMPLES = Path(__file__).resolve().parents[2] / "examples" / "specs"
 MAX_BODY = 4 * 1024 * 1024
@@ -477,7 +483,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def rl_catalog(self) -> None:
         ok, why = rl_available()
-        out = dict(available=ok, reason=why, devices=available_devices(), runs_root=str(self.app.rl.root))
+        out = dict(available=ok, reason=why, devices=available_devices(), runs_root=str(self.app.rl.root),
+                   beamng=beamng_info())
         if ok:
             from ..rl.catalog import catalog
             out["catalog"] = catalog()
@@ -531,17 +538,51 @@ class Handler(BaseHTTPRequestHandler):
     def rl_rollout(self, name: str) -> None:
         body = self._body() or {}
         policy = body.get("policy", "policy")
-        if policy not in ("policy", "lqr", "zero"):
-            raise _HttpError(HTTPStatus.BAD_REQUEST, "policy must be policy, lqr or zero")
+        if policy not in ("policy", "best", "lqr", "zero"):
+            raise _HttpError(HTTPStatus.BAD_REQUEST, "policy must be policy, best, lqr or zero")
         init = body.get("init_drift")
+        grip, change = body.get("grip"), body.get("grip_change")
+        try:
+            grip = None if grip in (None, "") else float(grip)
+            if grip is not None and not 0.01 <= grip <= 5.0:
+                raise ValueError
+            change = None if not change else (float(change[0]), float(change[1]))
+            if change is not None and not (0.05 <= change[0] <= 5.0 and 0.0 <= change[1] <= 600.0):
+                raise ValueError
+        except (TypeError, ValueError, IndexError):
+            raise _HttpError(HTTPStatus.BAD_REQUEST, "grip must be 0.01-5 and grip_change [factor 0.05-5, seconds]") from None
         try:
             data = self.app.rl.rollout(self._rl_folder(name), policy, int(body.get("seed", 0)),
-                                       None if init is None else bool(init))
+                                       None if init is None else bool(init), grip=grip, grip_change=change)
         except FileNotFoundError as exc:
             raise _HttpError(HTTPStatus.NOT_FOUND, str(exc) or "no such run") from None
         except RuntimeError as exc:
             raise _HttpError(HTTPStatus.BAD_REQUEST, str(exc)) from None
         self._json(data)
+
+    def rl_export(self, name: str) -> None:
+        body = self._body() or {}
+        which = body.get("which", "auto")
+        if which not in ("auto", "best", "last"):
+            raise _HttpError(HTTPStatus.BAD_REQUEST, "which must be auto, best or last")
+        try:
+            self._json(self.app.rl.export(self._rl_folder(name), which))
+        except FileNotFoundError as exc:
+            raise _HttpError(HTTPStatus.NOT_FOUND, str(exc) or "no such run") from None
+        except (ValueError, RuntimeError) as exc:
+            raise _HttpError(HTTPStatus.BAD_REQUEST, str(exc)) from None
+
+    def rl_beamng(self, name: str) -> None:
+        body = self._body() or {}
+        try:
+            if body.get("action") == "stop":
+                self._json(self.app.rl.beamng_stop() or {})
+            else:
+                self._json(self.app.rl.beamng_start(self._rl_folder(name), body))
+        except FileNotFoundError as exc:
+            raise _HttpError(HTTPStatus.NOT_FOUND, str(exc) or "no such run") from None
+        except ValueError as exc:
+            raise _HttpError(HTTPStatus.BAD_REQUEST, str(exc)) from None
 
     def rl_file(self, name: str, fname: str) -> None:
         try:
@@ -597,6 +638,8 @@ ROUTES = [(m, re.compile(p), fn) for m, p, fn in [
     ("POST", rf"/api/rl/runs/{_N}/stop", Handler.rl_stop),
     ("GET", rf"/api/rl/runs/{_N}/snapshots/{_N}", Handler.rl_snapshot),
     ("POST", rf"/api/rl/runs/{_N}/rollout", Handler.rl_rollout),
+    ("POST", rf"/api/rl/runs/{_N}/export", Handler.rl_export),
+    ("POST", rf"/api/rl/runs/{_N}/beamng", Handler.rl_beamng),
     ("GET", rf"/api/rl/runs/{_N}/files/{_N}", Handler.rl_file),
     ("POST", rf"/api/rl/runs/{_N}/reveal", Handler.rl_reveal),
 ]]

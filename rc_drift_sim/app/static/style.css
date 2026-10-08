@@ -342,3 +342,12 @@ table.data tr.selected td { background: var(--accent-soft); }
 .playbar input[type=range] { flex: 1; }
 .toggle.small { font-size: 12.5px; }
 @media (max-width: 760px) { .viewer canvas.scene { height: 300px; } }
+
+/* RL presets */
+.preset-list { display: flex; flex-direction: column; gap: 8px; }
+.preset { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px; }
+.preset .btn { flex: none; }
+
+/* the hidden attribute must win over display rules such as .btn */
+[hidden] { display: none !important; }

@@ -5,7 +5,7 @@ with a label, unit, limits and a plain description; defaults come from the datac
 ``tests/test_rl_gui.py`` checks that no field is missing. The GUI sends::
 
     {"name": "...", "env": {EnvConfig fields}, "noise": {...}, "reward": {RewardWeights fields},
-     "ppo": {PPOConfig fields}, "run": {"device", "precision", "snapshots"},
+     "safety": {SafetyConfig fields}, "ppo": {PPOConfig fields}, "run": {"device", "precision", "snapshots"},
      "randomize": {datagen "params" dict} }
 
 and ``build_configs`` returns ``(EnvConfig, PPOConfig, run options, errors)``.
@@ -17,11 +17,15 @@ import math
 import re
 from typing import Any
 
-from .config import OBS_MODES, TASKS, EnvConfig, RewardWeights
+from ..deploy.safety import SafetyConfig
+from .config import MAX_HISTORY, OBS_MODES, TASKS, EnvConfig, RewardWeights
+from .evaluation import DEFAULT_LEVELS
 
 PPO_DEFAULTS = dict(total_steps=20_000_000, num_envs=1024, rollout=32, epochs=5, minibatches=8, gamma=0.99,
                     lam=0.95, clip=0.2, lr=3e-4, entropy=0.0, value_coef=0.5, max_grad_norm=1.0,
-                    init_log_std=-0.5, hidden=(256, 256), seed=0)        # = ppo.PPOConfig() (torch-free import)
+                    init_log_std=-0.5, hidden=(256, 256), seed=0, lr_schedule="constant", grip_estimator=False,
+                    estimator_hidden=(128, 64), estimator_coef=1.0, privileged_critic=False, eval_every=0,
+                    eval_cars=8, eval_grip_levels=DEFAULT_LEVELS)        # = ppo.PPOConfig() (torch-free import)
 
 
 def _f(key, label, unit="", typ="float", lo=None, hi=None, desc="", tasks=None, choices=None, level="basic"):
@@ -46,6 +50,18 @@ ENV_FIELDS = [
     _f("init_drift_prob", "Drift starts", "share", lo=0, hi=1,
        desc="share of episodes that start in a steady drift (curriculum)"),
     _f("spin_beta_deg", "Spin-out threshold", "deg", lo=10, hi=180, desc="|sideslip| above which a moving car has spun"),
+    _f("target_beta_jitter_deg", "Sideslip command range", "± deg", lo=0, hi=60, tasks=["hold"],
+       desc="each episode commands its own target sideslip, target ± up to this (0 = always the target)"),
+    _f("target_speed_jitter", "Speed command range", "± m/s", lo=0, hi=10,
+       desc="each episode commands its own target speed, target ± up to this"),
+    _f("front_wheel_speeds", "Front wheel encoders", typ="bool",
+       desc="the policy reads the front wheel speeds too; off if the car only measures the driven (rear) wheels"),
+    _f("history", "Sensor history", "steps", "int", lo=1, hi=MAX_HISTORY,
+       desc="readings the policy sees at once (20 ms each); more lets it feel the grip (16 = 0.32 s)"),
+    _f("grip_change_prob", "Grip changes mid-episode", "share", lo=0, hi=1,
+       desc="share of episodes where the grip jumps once (a wet or dusty patch), so the policy must re-adapt"),
+    _f("grip_change_min", "Grip change, lowest", "×", lo=0.05, hi=1, desc="smallest factor the grip is multiplied by"),
+    _f("grip_change_max", "Grip change, highest", "×", lo=1, hi=5, desc="largest factor the grip is multiplied by"),
     _f("obs", "Observations", typ="choice", choices=list(OBS_MODES),
        desc="sensors: what the real car measures (with noise); full: the simulator state"),
     _f("seed", "Seed", typ="int", lo=0, desc="the episode sequence (cars, starts) is a function of the seed"),
@@ -64,10 +80,30 @@ REWARD_FIELDS = [
     _f("action_rate", "Smoothness penalty", lo=0,
        desc="penalty on the squared change of the commands per step (raise it against chattering)"),
     _f("spin", "Early-end penalty", lo=0, desc="one-off penalty for a spin-out, leaving the line or a numerical failure"),
+    _f("intervention", "Safety-filter penalty", lo=0,
+       desc="penalty on the squared change the safety filter made, so the policy learns to stay inside the envelope"),
     _f("beta_sigma_deg", "Sideslip tolerance", "deg", lo=0.1, tasks=["hold"], desc="width of the sideslip reward"),
     _f("speed_sigma", "Speed tolerance", "m/s", lo=0.01, desc="width of the speed reward"),
     _f("track_sigma", "Line tolerance", "m", lo=0.01, tasks=["track"], desc="width of the line reward"),
     _f("drift_min_deg", "Drift bonus from", "deg", lo=0, hi=80, tasks=["track"], desc="|sideslip| where the drift bonus starts"),
+]
+SAFETY_FIELDS = [
+    _f("enabled", "Safety filter", typ="bool",
+       desc="filter every command, in training as on the car: rate limits, sideslip and rotation envelopes, speed limit"),
+    _f("beta_soft_deg", "Recovery starts at", "deg", lo=1, hi=179, desc="|sideslip| where the counter-steer recovery begins to blend in"),
+    _f("beta_hard_deg", "Full recovery at", "deg", lo=2, hi=180, desc="|sideslip| where the recovery has full control"),
+    _f("yaw_margin", "Rotation margin", "×", lo=0.1, hi=10,
+       desc="allowed yaw rate as a multiple of the friction-limited turn rate (grip × g / speed)"),
+    _f("v_max", "Speed limit", "m/s", lo=0.1, hi=30, desc="the throttle fades out above this speed"),
+    _f("steer_rate", "Steering rate limit", "/step", lo=0, hi=2, desc="largest change of the steer command per 20 ms (0 = off)"),
+    _f("throttle_rate", "Throttle rate limit", "/step", lo=0, hi=2, desc="largest change of the throttle per 20 ms (0 = off)"),
+    _f("throttle_recover", "Recovery throttle", "", lo=-1, hi=1, desc="throttle ceiling during a full recovery", level="advanced"),
+    _f("yaw_damping", "Recovery yaw damping", "rad per rad/s", lo=0, hi=2,
+       desc="extra counter-steer against the rotation during a recovery", level="advanced"),
+    _f("min_speed", "Checks from", "m/s", lo=0.05, hi=10, desc="below this speed the sideslip and rotation checks are off",
+       level="advanced"),
+    _f("nominal_grip", "Assumed grip", "μ", lo=0.02, hi=2,
+       desc="friction coefficient the filter assumes when the policy has no grip estimator"),
 ]
 PPO_FIELDS = [
     _f("total_steps", "Training steps", "steps", "int", lo=1000, desc="environment steps in total (cars x control steps)"),
@@ -85,6 +121,19 @@ PPO_FIELDS = [
     _f("init_log_std", "Initial log std", "", lo=-5, hi=2, desc="initial exploration noise of the actions (log)"),
     _f("hidden", "Hidden layers", "", "intlist", desc="neurons per hidden layer, e.g. 256, 256"),
     _f("seed", "Training seed", "", "int", lo=0, desc="network initialization and action sampling"),
+    _f("lr_schedule", "Learning-rate schedule", typ="choice", choices=["constant", "linear"],
+       desc="linear: decays to zero by the end, which settles the final policy"),
+    _f("grip_estimator", "Grip estimator", typ="bool",
+       desc="a second network estimates the friction from the sensor history; the policy and the safety filter use it"),
+    _f("estimator_hidden", "Estimator layers", "", "intlist", desc="neurons per hidden layer of the grip estimator", level="advanced"),
+    _f("estimator_coef", "Estimator loss weight", "", lo=0, desc="weight of the grip-regression loss", level="advanced"),
+    _f("privileged_critic", "Privileged critic", typ="bool",
+       desc="the critic also sees the true simulator state and grip (training only, the policy never does)"),
+    _f("eval_every", "Evaluate every", "iterations", "int", lo=0,
+       desc="score the policy on a grip sweep this often and keep the best one as best.pt (0 = off)"),
+    _f("eval_cars", "Evaluation cars per level", "cars", "int", lo=1, hi=4096, desc="cars (episodes) per grip level"),
+    _f("eval_grip_levels", "Evaluation grip levels", "×", "floatlist",
+       desc="surface grip multipliers of the sweep (1 = P-tile; peak μ ≈ 0.42 × level with plastic tires)"),
 ]
 RUN_FIELDS = [
     _f("device", "Compute device", typ="choice", choices=["cpu", "mps", "cuda", "auto"],
@@ -98,10 +147,13 @@ RUN_DEFAULTS = dict(device="cpu", precision="float32", snapshots=20)
 
 def catalog() -> dict:
     env, rw = EnvConfig(), RewardWeights()
+    from .presets import presets_for_gui
     d = dict(env=_with_defaults(ENV_FIELDS, dataclasses.asdict(env)), noise=_with_defaults(NOISE_FIELDS, env.noise),
-             reward=_with_defaults(REWARD_FIELDS, dataclasses.asdict(rw)), ppo=_with_defaults(PPO_FIELDS, PPO_DEFAULTS),
-             run=_with_defaults(RUN_FIELDS, RUN_DEFAULTS))
+             reward=_with_defaults(REWARD_FIELDS, dataclasses.asdict(rw)),
+             safety=_with_defaults(SAFETY_FIELDS, dataclasses.asdict(SafetyConfig())),
+             ppo=_with_defaults(PPO_FIELDS, PPO_DEFAULTS), run=_with_defaults(RUN_FIELDS, RUN_DEFAULTS))
     d["defaults"] = {k: {f["key"]: f["default"] for f in v} for k, v in d.items()}
+    d["presets"] = presets_for_gui()
     return d
 
 
@@ -124,6 +176,17 @@ def _check(f: dict, v: Any, where: str, errors: list[str]) -> Any:
         if not isinstance(v, bool):
             errors.append(f"{name}: must be true or false")
         return bool(v)
+    if t == "floatlist":
+        if isinstance(v, str):
+            v = [x for x in re.split(r"[,\s]+", v.strip()) if x]
+        try:
+            vals = [float(x) for x in v]
+        except (TypeError, ValueError):
+            errors.append(f"{name}: a list of numbers, e.g. 0.3, 0.6, 0.9")
+            return v
+        if not vals or len(vals) > 32 or any(not math.isfinite(x) or x <= 0 or x > 5 for x in vals):
+            errors.append(f"{name}: 1 to 32 numbers, each above 0 and at most 5")
+        return vals
     if t == "intlist":
         if isinstance(v, str):
             v = [x for x in re.split(r"[,\s]+", v.strip()) if x]
@@ -156,7 +219,7 @@ def build_configs(body: dict) -> tuple[EnvConfig | None, dict | None, dict, list
     errors: list[str] = []
     cat = catalog()
     parts: dict[str, dict] = {}
-    for part in ("env", "noise", "reward", "ppo", "run"):
+    for part in ("env", "noise", "reward", "safety", "ppo", "run"):
         given = body.get(part) or {}
         if not isinstance(given, dict):
             errors.append(f"{part} must be an object")
@@ -176,7 +239,8 @@ def build_configs(body: dict) -> tuple[EnvConfig | None, dict | None, dict, list
         errors.append("ppo: training steps must cover at least one iteration (cars x rollout length)")
     if errors:
         return None, None, parts["run"], errors
-    env = EnvConfig(**parts["env"], noise=parts["noise"], reward=RewardWeights(**parts["reward"]), randomize=rnd)
+    env = EnvConfig(**parts["env"], noise=parts["noise"], reward=RewardWeights(**parts["reward"]),
+                    safety=SafetyConfig(**parts["safety"]), randomize=rnd)
     try:
         env.validate()
     except ValueError as exc:
@@ -195,9 +259,14 @@ def build_configs(body: dict) -> tuple[EnvConfig | None, dict | None, dict, list
                 errors.append("run.precision: Apple GPUs (mps) only support float32")
         except ValueError as exc:
             errors.append(f"run.device: {exc}")
-    ppo = dict(ppo, hidden=tuple(ppo["hidden"]))
+    if not errors and ppo["grip_estimator"] and env.history < 2:
+        errors.append("ppo.grip_estimator: needs a sensor history of at least 2 steps to feel the grip")
+    if not errors and env.safety.enabled and env.obs != "sensors":
+        errors.append("safety.enabled: the safety filter works on the sensor readings (observations: sensors)")
+    ppo = dict(ppo, hidden=tuple(ppo["hidden"]), estimator_hidden=tuple(ppo["estimator_hidden"]),
+               eval_grip_levels=tuple(ppo["eval_grip_levels"]))
     return (None if errors else env), (None if errors else ppo), run, errors
 
 
-__all__ = ["catalog", "build_configs", "ENV_FIELDS", "NOISE_FIELDS", "REWARD_FIELDS", "PPO_FIELDS", "RUN_FIELDS",
-           "PPO_DEFAULTS"]
+__all__ = ["catalog", "build_configs", "ENV_FIELDS", "NOISE_FIELDS", "REWARD_FIELDS", "SAFETY_FIELDS", "PPO_FIELDS",
+           "RUN_FIELDS", "PPO_DEFAULTS"]
