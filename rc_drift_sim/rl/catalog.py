@@ -25,7 +25,8 @@ PPO_DEFAULTS = dict(total_steps=20_000_000, num_envs=1024, rollout=32, epochs=5,
                     lam=0.95, clip=0.2, lr=3e-4, entropy=0.0, value_coef=0.5, max_grad_norm=1.0,
                     init_log_std=-0.5, hidden=(256, 256), seed=0, lr_schedule="constant", grip_estimator=False,
                     estimator_hidden=(128, 64), estimator_coef=1.0, privileged_critic=False, eval_every=0,
-                    eval_cars=8, eval_grip_levels=DEFAULT_LEVELS)        # = ppo.PPOConfig() (torch-free import)
+                    eval_cars=8, eval_grip_levels=DEFAULT_LEVELS, smooth_temporal=0.0, smooth_spatial=0.0,
+                    smooth_sigma=0.05)                                   # = ppo.PPOConfig() (torch-free import)
 
 
 def _f(key, label, unit="", typ="float", lo=None, hi=None, desc="", tasks=None, choices=None, level="basic"):
@@ -134,6 +135,12 @@ PPO_FIELDS = [
     _f("eval_cars", "Evaluation cars per level", "cars", "int", lo=1, hi=4096, desc="cars (episodes) per grip level"),
     _f("eval_grip_levels", "Evaluation grip levels", "×", "floatlist",
        desc="surface grip multipliers of the sweep (1 = P-tile; peak μ ≈ 0.42 × level with plastic tires)"),
+    _f("smooth_temporal", "Smoothness: in time", "", lo=0,
+       desc="weight of the policy's command change between consecutive steps (CAPS; removes steering chatter, 0 = off)"),
+    _f("smooth_spatial", "Smoothness: in state", "", lo=0,
+       desc="weight of the command change for slightly different sensor readings (CAPS; 0 = off)"),
+    _f("smooth_sigma", "Smoothness noise", "", lo=0, level="advanced",
+       desc="size of those reading differences, in normalized units"),
 ]
 RUN_FIELDS = [
     _f("device", "Compute device", typ="choice", choices=["cpu", "mps", "cuda", "auto"],

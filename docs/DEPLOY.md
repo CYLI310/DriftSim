@@ -124,7 +124,24 @@ log (`final/drive_beamng.csv`).
 ```
 
 Options: `--beamng-home` (if BeamNG is not found), `--vehicle` / `--part-config` (the car),
-`--level`, `--scale`, `--steer-lock-deg`, `--throttle-gain`, `--gear`, `--wheel-key`.
+`--level`, `--scale`, `--throttle-mode motor|direct`, `--gear`, `--assists off|keep`,
+`--wheel-key`, `--steer-lock-deg`, `--no-calibrate`, `--motor-gains`, `--throttle-gain`.
+
+**Try the driver without BeamNG** (any computer): `rc_drift_sim.deploy.beamng_standin` puts a
+stand-in for beamngpy in place: DriftSim physics enlarged k times, with the full-size car's
+differences switched on at will (engine-like throttle, automatic gearbox, ESC/TCS, a different
+steering lock, an averaging `wheelspeed`, a mirrored world):
+
+```python
+from rc_drift_sim.deploy.beamng import BeamNGCar
+from rc_drift_sim.deploy.beamng_standin import standin
+from rc_drift_sim.deploy.car_loop import drive
+from rc_drift_sim.deploy.runtime import PolicyRuntime
+
+rt = PolicyRuntime("rl_runs/<run>/final")
+with standin(k=10, engine=True, auto_gearbox=True, assists=True, steer_ratio=0.7):
+    print(drive(rt, BeamNGCar(rt.meta, home="x"), 15.0, None, verbose=False))
+```
 
 About BeamNG.drive from Steam: `beamngpy` is made for BeamNG.tech (free for research and
 academic use on request); the Steam BeamNG.drive works with it in part. The driver only uses the
@@ -145,12 +162,46 @@ How the test works:
   at about μ 0.3. BeamNGpy has no ground-friction setting, so choose a rear-drive configuration with
   slippery tires (drift, worn or winter tires on asphalt) in the vehicle's parts. On dry asphalt with
   road tires the car is far outside what the policy learned.
-* **Steering** is calibrated at the start (a short steer test decides which BeamNG input turns left,
-  whatever BeamNG's sign conventions). `steer lock` is the car's road-wheel angle at full input if it
-  differs from the trained 35°. `throttle gain` scales the throttle (an engine is not an RC motor);
-  `--gear 1` if the car does not move.
-* **Wheel speed.** The driven-wheel speed comes from the Electrics value `wheelspeed`; the start-up
-  message lists the wheel/speed values your version has (`--wheel-key` picks another).
+* **Throttle: the RC motor is emulated** (`--throttle-mode motor`, the default). The RC car's
+  motor is stiff (about 1.3 g of drive force per m/s of wheel-speed error), so its throttle is in
+  effect a rear-wheel speed command: rear wheels at about throttle x 9.3 m/s whatever the grip. A
+  full-size engine with a gearbox is a torque source, which is a plant the policy never saw. The
+  driver therefore runs a wheel-speed servo four times per control step: a PI loop on BeamNG's
+  throttle drives the rear wheels to throttle x no-load speed (Froude-scaled) and the parking brake
+  (rear wheels only) slows them when they run faster, as the motor's braking current does.
+  `--throttle-mode direct` sends the throttle as it is (x `--throttle-gain`).
+* **One gear.** An automatic gearbox cuts the drive at every shift, in the middle of the slide. In
+  motor mode the driver selects manual shifting with an automatic clutch and holds `--gear` (default
+  2; `--gear 1` for a car that is short of torque, `--gear auto` for BeamNG's own gearbox).
+* **Assists off.** ESC and traction control brake wheels and cut the throttle exactly when the car
+  slides. `--assists off` (the default) switches the car's ESC mode to off through beamngpy (tries
+  the "off" keys, then cycles through the car's modes). Cars whose ESC cannot be switched (beamngpy
+  reports the mode "none") are reported; pick a configuration without ESC then. The summary says how
+  often ESC and TCS were active.
+* **Rear-wheel speed.** BeamNG's Electrics `wheelspeed` is a speedometer value, not the driven
+  wheels, so the driver reads every wheel's speed in the vehicle's Lua (`--wheel-key auto`) and uses
+  the rear ones, scaled so the free-rolling front wheels match the ground speed. If the Lua query
+  gives nothing it falls back to `wheelspeed` (and says so).
+* **Steering is calibrated** at the start: a slow straight roll, then a slow steady turn at 0.4
+  input. The turn's direction gives the steering sign (whatever BeamNG's conventions) and its
+  curvature, compared with DriftSim's trained car in the same slow turn, gives the steering gain:
+  the reported RC-equivalent lock is the angle at which the BeamNG car turns as much per input as the
+  trained car. (Comparing with DriftSim rather than with plain kinematics matters: the trained car's
+  locked rear axle makes it understeer, so kinematics would misjudge the gain by about 20 %.) If the
+  BeamNG car has less lock than the trained 35°, the policy's counter-steer saturates; the summary
+  warns and a drift steering rack helps. `--steer-lock-deg` sets the lock instead.
+
+**Reading the result.** The summary (and the GUI card) gives the second-half sideslip and speed with
+their spread (`beta_std_deg_2nd_half`, `speed_std_2nd_half`: a smooth drift holds both within a
+degree or two and a few cm/s), `smoothness` (mean command change per step and steering reversals per
+second), the driver's `car` facts (assists, gear, gear changes, wheel source, measured lock, ESC/TCS
+activity, steering saturation) and `advice`: plain-language hints such as "the grip estimate is above
+the trained range" (the tires or surface are too grippy) or "the gearbox shifted N times".
+
+Against the stand-in with all the full-size differences on at once (k = 16, mirrored world,
+reversed steering, engine, automatic gearbox, ESC/TCS, 20 % more lock), the same policy held 11.0 ±
+6.8° at 1.15 ± 0.25 m/s with direct throttle, BeamNG's gearbox and the assists kept, and 30.5 ±
+0.3° at 2.21 ± 0.01 m/s with the defaults above.
 
 What a pass means: the car holds a slide near the commanded sideslip without spinning and the filter
 rarely acts. A fail means the policy does not transfer to these dynamics; it does not by itself mean

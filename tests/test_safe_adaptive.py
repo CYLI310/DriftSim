@@ -130,6 +130,9 @@ def test_training_with_estimator_privileged_critic_and_evaluation(trained):
     from rc_drift_sim.rl.ppo import load_checkpoint
     model, cfg, ppo, ck = load_checkpoint(out / "best.pt")
     assert model.est is not None and model.n_priv > 0 and ck["obs_spec"]["history"] == 16 and cfg.safety.enabled
+    # the preset trains with the CAPS smoothness terms; both are logged every iteration
+    assert ppo.smooth_temporal > 0 and ppo.smooth_spatial > 0
+    assert all(r["smooth_temporal"] >= 0 and r["smooth_spatial"] >= 0 for r in hist)
 
 
 def test_export_and_runtime_reproduce_the_training_environment(trained):
@@ -170,7 +173,9 @@ def test_sim_car_loop_runs_the_exported_model(trained, tmp_path):
     rt.set_targets(beta_deg=90, speed=0.1)                          # clipped to the trained range
     assert math.degrees(rt.target_beta) == pytest.approx(38) and rt.target_speed == pytest.approx(1.2)
     res = drive(rt, SimCar(rt.meta, grip=0.5, grip_change=(0.6, 0.5)), 1.0, tmp_path / "log.csv", verbose=False)
-    assert res["steps"] == 50 and res["grip_true_2nd_half"] > 0 and (tmp_path / "log.csv").is_file()
+    # the barely trained test policy may spin out early (the loop then stops, as on the car)
+    assert (res["steps"] == 50 or (res["ended_early"] and res["steps"] > 10)) and res["grip_true_2nd_half"] > 0
+    assert (tmp_path / "log.csv").is_file()
 
 
 def test_beamng_frame_conversion_and_froude_scaling():
@@ -232,100 +237,10 @@ def test_gui_exports_and_replays_the_best_policy(tmp_path):
         srv.server_close()
 
 
-def _fake_beamngpy(k: float, mirror: bool, steer_sign: float, grip: float):
-    """A stand-in for beamngpy: DriftSim physics enlarged k times (Froude-scaled), in a world that may
-    be mirrored (left-handed) and with a steering input that may be reversed."""
+def _fake_beamngpy(k: float, mirror: bool, steer_sign: float, grip: float, **kw):
     import sys
-    import types
-
-    from rc_drift_sim.sim.vehicle import make_vehicle
-    car = make_vehicle(mu_scale=grip)
-    sk = math.sqrt(k)
-
-    class Vehicle:
-        def __init__(self, vid, model, **kw):
-            self.s = car.initial_state()
-            self.u = np.zeros(2)
-            self.sensors = self
-            self._el = {}
-
-        # sensors API
-        def attach(self, name, sensor):
-            pass
-
-        def poll(self):
-            self._el = {"wheelspeed": float(self.s[S.OMEGA][2] * car.model.Rw) * sk, "airspeed": 0.0}
-
-        def __getitem__(self, name):
-            return self._el
-
-        @property
-        def state(self):
-            yaw, sgn = self.s[S.YAW], (-1.0 if mirror else 1.0)
-            f = np.array([math.cos(yaw), sgn * math.sin(yaw), 0.0])
-            lft = np.array([-math.sin(yaw), sgn * math.cos(yaw), 0.0])
-            v = (self.s[S.VX] * f + self.s[S.VY] * lft) * sk
-            return dict(pos=[self.s[S.X] * k, sgn * self.s[S.Y] * k, 0.0], dir=list(f), up=[0, 0, 1], vel=list(v))
-
-        def control(self, steering, throttle, brake, parkingbrake=0.0, gear=None):
-            self.u = np.array([steer_sign * steering, throttle - brake])
-
-        def get_bbox(self):
-            L = car.params.vehicle.body_length * k
-            return {"a": [0, 0, 0], "b": [L, 0.4 * L, 0.3 * L]}
-
-    class Ctl:
-        def __init__(self, bng):
-            self.bng = bng
-
-        def pause(self):
-            pass
-
-        def step(self, n, wait=True):
-            v = self.bng.vehicle
-            model_time = n / self.bng.sps / sk
-            v.s, _ = car.step(v.s, v.u, n_sub=max(1, int(round(model_time / car.dt))), want_info=False)
-
-    class Settings:
-        def __init__(self, bng):
-            self.bng = bng
-
-        def set_deterministic(self, sps):
-            self.bng.sps = sps
-
-    class ScenarioApi:
-        def load(self, scenario):
-            pass
-
-        def start(self):
-            pass
-
-    class BeamNGpy:
-        def __init__(self, host, port, home=None, user=None):
-            self.control, self.settings, self.scenario = Ctl(self), Settings(self), ScenarioApi()
-
-        def open(self, launch=True):
-            return self
-
-        def close(self):
-            pass
-
-    class Scenario:
-        def __init__(self, level, name):
-            pass
-
-        def add_vehicle(self, vehicle, pos, rot_quat):
-            self.vehicle = vehicle
-
-        def make(self, bng):
-            bng.vehicle = self.vehicle
-
-    mod = types.ModuleType("beamngpy")
-    mod.BeamNGpy, mod.Scenario, mod.Vehicle = BeamNGpy, Scenario, Vehicle
-    sens = types.ModuleType("beamngpy.sensors")
-    sens.Electrics = lambda: None
-    mod.sensors = sens
-    return {"beamngpy": mod, "beamngpy.sensors": sens}, sys
+    from rc_drift_sim.deploy.beamng_standin import fake_beamngpy
+    return fake_beamngpy(k, mirror, steer_sign, grip, **kw), sys
 
 
 @pytest.mark.parametrize("mirror,steer_sign", [(False, 1.0), (False, -1.0), (True, 1.0), (True, -1.0)])
@@ -423,3 +338,74 @@ def test_gui_lists_runs_trained_on_the_command_line(trained, tmp_path):
     assert [r["id"] for r in runs] == ["from_jetson"] and runs[0]["best_score"] is not None
     d = mgr.get("from_jetson")
     assert d["status"] == "complete" and len(d["history"]) == 3 and d["export"] is None
+
+
+def test_motor_emulator_tracks_the_rc_wheel_speed_command():
+    from rc_drift_sim.deploy.beamng import MotorEmulator
+    emu = MotorEmulator(v0=9.3, thr_min=0.02)
+    v, dt = 0.0, 0.005
+    for _ in range(2000):                              # a soft, engine-like wheel: dv/dt = 6 thr - 0.5 v - 4 pbrake
+        thr, brake, pb = emu(0.25, v, dt)
+        v += dt * (6.0 * thr - 0.5 * v - 4.0 * pb * (v > 0))
+    assert v == pytest.approx(0.25 * 9.3, abs=0.05) and brake == 0.0
+    assert emu(0.01, v, dt) == (0.0, 0.0, 0.0)         # ESC deadband: coast
+    thr, brake, pb = emu(-0.5, 2.0, dt)                # the ESC brake acts on the rear wheels only
+    assert thr == 0.0 and brake == 0.0 and pb > 0
+    emu.reset()
+    thr, _, pb = emu(0.1, 3.0, dt)                     # wheels far faster than commanded: no throttle, rear brake
+    assert thr == 0.0 and pb > 0
+
+
+def test_wheel_parsing_and_axles():
+    from rc_drift_sim.deploy.beamng import axle_names, lock_from_curvature, parse_wheels
+    w = parse_wheels({"FL": [10.0, 0.3, 0], "FR": [10.0, 0.3, 0], "RL": [20.0, 0.3, 0], "RR": [22.0, 0.3, 0]})
+    assert w["RR"] == pytest.approx(6.6) and axle_names(sorted(w)) == (["FL", "FR"], ["RL", "RR"])
+    assert parse_wheels(None) is None and parse_wheels({"FL": "x", "RL": 1}) is None
+    # a slow 2 m/s turn at 0.4 input, yaw rate 0.5 rad/s, car 10x the 0.257 m wheelbase: atan(0.25 * 10 * 0.257) / 0.4
+    assert lock_from_curvature(0.5, 2.0, 10.0, 0.257, 0.4) == pytest.approx(math.atan(0.6425) / 0.4)
+
+
+def test_beamng_driver_fixes_assists_gearbox_steering_and_wheels(trained, tmp_path, monkeypatch):
+    """Against a stand-in with an engine-like throttle, an automatic gearbox, ESC/TCS on, 30 % less steering
+    lock and an averaging 'wheelspeed': the default driver switches the assists off, holds a gear, emulates
+    the RC motor, reads the rear wheels and measures the steering gain; the old behaviour (direct throttle,
+    assists kept, no calibration) lets ESC act and is told so in the advice."""
+    from rc_drift_sim.deploy.beamng import BeamNGCar
+    from rc_drift_sim.deploy.car_loop import drive
+    from rc_drift_sim.deploy.runtime import PolicyRuntime
+    from rc_drift_sim.rl.export import export_final
+    out, _ = trained
+    folder = export_final(out, out=tmp_path / "final")["folder"]
+    kw = dict(engine=True, auto_gearbox=True, assists=True, steer_ratio=0.7)
+    mods, sys = _fake_beamngpy(10.0, False, 1.0, grip=0.7, **kw)
+    for name, m in mods.items():
+        monkeypatch.setitem(sys.modules, name, m)
+    rt = PolicyRuntime(folder)
+    car = BeamNGCar(rt.meta, home="x")
+    res = drive(rt, car, 1.0, None, verbose=False)
+    d = res["car"]
+    assert d["assists"] == "off" and d["gear"] == 2 and d["gear_changes"] == 0 and d["esc_active_share"] == 0.0
+    assert d["wheels"].startswith("Lua") and car.vehicle.calls.get("set_shift_mode") == 1
+    assert d["lock_rc_equiv_deg"] == pytest.approx(0.7 * 35.0, rel=0.15)        # the 30 % smaller lock is measured
+    assert set(res["smoothness"]) >= {"steer_step", "throttle_step", "steer_reversals_per_s"}
+    rt = PolicyRuntime(folder)
+    mods, _ = _fake_beamngpy(10.0, False, 1.0, grip=0.7, **kw)
+    for name, m in mods.items():
+        monkeypatch.setitem(sys.modules, name, m)
+    old = BeamNGCar(rt.meta, home="x", throttle_mode="direct", assists="keep", calibrate=False, wheel_key="wheelspeed")
+    res_old = drive(rt, old, 1.0, None, verbose=False)
+    assert res_old["car"]["assists"] == "kept" and res_old["car"]["gear"] == "auto"
+    assert res_old["car"]["lock_rc_equiv_deg"] == pytest.approx(35.0)
+
+
+def test_drive_advice_names_the_problems():
+    from rc_drift_sim.deploy.car_loop import advice
+
+    class RT:
+        meta = {"evaluation": {"levels": [{"grip": 0.1}, {"grip": 0.42}]}}
+    notes = advice(dict(grip_estimate_2nd_half=0.8, override_share=0.3, smoothness=dict(steer_reversals_per_s=12),
+                        car=dict(esc_active_share=0.2, gear_changes=5, steer_saturated_share=0.2)), RT())
+    text = " ".join(notes)
+    for word in ("grippy", "ESC", "gear", "lock", "safety filter", "chatter"):
+        assert word in text
+    assert advice(dict(grip_estimate_2nd_half=0.3, override_share=0.0), RT()) == []

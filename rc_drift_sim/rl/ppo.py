@@ -17,6 +17,12 @@ estimate feeds the policy and the safety filter, on the car as in training. ``pr
 gives the critic the simulator state (training only; the policy never sees it). With ``eval_every``
 the policy is scored on a grip sweep (``rl.evaluation``) and the best one is kept as ``best.pt``.
 
+Smooth actions (``smooth_temporal`` / ``smooth_spatial``, CAPS: Mysore et al., ICRA 2021): the mean
+action is regularized to change little between consecutive observations and between an observation
+and a slightly perturbed copy. The action-rate penalty in the reward acts on the sampled (noisy)
+actions; these terms act directly on the deterministic policy the car drives, which removes the
+small, fast steering chatter without slowing the policy's real corrections much.
+
     driftsim-train --preset safe-adaptive --device cuda --out runs/final     # the recommended setup
     driftsim-train --config settings.json --device cuda                      # settings saved from the GUI
 """
@@ -66,6 +72,9 @@ class PPOConfig:
     eval_every: int = 0                 # iterations between grip-sweep evaluations (0 = off); keeps best.pt
     eval_cars: int = 8                  # cars per grip level in an evaluation
     eval_grip_levels: tuple = field(default=DEFAULT_LEVELS)
+    smooth_temporal: float = 0.0        # CAPS: weight of |mean action(s_t) - mean action(s_t+1)|^2 (0 = off)
+    smooth_spatial: float = 0.0         # CAPS: weight of |mean action(s) - mean action(s + noise)|^2 (0 = off)
+    smooth_sigma: float = 0.05          # std of that noise in normalized observation units
 
 
 class RunningNorm(nn.Module):
@@ -267,6 +276,13 @@ def train(env_cfg: EnvConfig, ppo: PPOConfig | None = None, device: str = "cpu",
                 adv[t] = last
             ret_t = adv + buf["val"]
         flat = {k: v.reshape((R * B,) + v.shape[2:]) for k, v in buf.items()}
+        smooth = ppo.smooth_temporal > 0 or ppo.smooth_spatial > 0
+        if smooth:                                       # next observation of each sample (same episode only)
+            with torch.no_grad():
+                nxt = torch.cat([buf["obs"][1:], model.norm(obs)[None]], dim=0)
+                flat_next = nxt.reshape((R * B,) + nxt.shape[2:])
+                flat_same = (1.0 - buf["done"]).reshape(-1)
+        smooth_t, smooth_s = [], []
         flat_adv, flat_ret = adv.reshape(-1), ret_t.reshape(-1)
         n = R * B
         mb = max(1, n // ppo.minibatches)
@@ -286,6 +302,20 @@ def train(env_cfg: EnvConfig, ppo: PPOConfig | None = None, device: str = "cpu",
                 v_loss = 0.5 * ((model.value(o_j, flat["priv"][j] if model.n_priv else None) - flat_ret[j]) ** 2).mean()
                 ent = d.entropy().sum(-1).mean()
                 loss = pg + ppo.value_coef * v_loss - ppo.entropy * ent
+                if smooth:
+                    mu = d.mean
+                    if ppo.smooth_temporal > 0:
+                        o_n = flat_next[j]
+                        mu_n = model.dist(o_n, model.grip(o_n)).mean
+                        m = flat_same[j]
+                        l_t = (((mu - mu_n) ** 2).sum(-1) * m).sum() / m.sum().clamp(min=1.0)
+                        loss = loss + ppo.smooth_temporal * l_t
+                        smooth_t.append(float(l_t.detach()))
+                    if ppo.smooth_spatial > 0:
+                        o_p = o_j + ppo.smooth_sigma * torch.randn_like(o_j)
+                        l_s = ((mu - model.dist(o_p, model.grip(o_p)).mean) ** 2).sum(-1).mean()
+                        loss = loss + ppo.smooth_spatial * l_s
+                        smooth_s.append(float(l_s.detach()))
                 if g_j is not None:
                     est_loss = ((g_j - flat["grip"][j]) ** 2).mean()
                     loss = loss + ppo.estimator_coef * est_loss / GRIP_STD ** 2
@@ -308,6 +338,10 @@ def train(env_cfg: EnvConfig, ppo: PPOConfig | None = None, device: str = "cpu",
                    value_loss=round(float(v_loss.detach()), 4), approx_kl=round(float(np.mean(kls)), 5),
                    clip_frac=round(float(np.mean(clipfracs)), 3), action_std=[round(float(x), 3) for x in model.log_std.detach().exp()],
                    lr=float(f"{opt.param_groups[0]['lr']:.3g}"))
+        if smooth_t:
+            row["smooth_temporal"] = round(float(np.mean(smooth_t)), 5)
+        if smooth_s:
+            row["smooth_spatial"] = round(float(np.mean(smooth_s)), 5)
         if out is not None:
             save_policy(model, out / "policy.pt", env_cfg, ppo, env.obs_names, env, iteration=it)
         if sweep is not None and (it % ppo.eval_every == 0 or it == n_iter):

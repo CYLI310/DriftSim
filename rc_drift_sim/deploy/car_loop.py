@@ -53,6 +53,10 @@ class CarInterface:
     def truth(self) -> dict:
         return {}
 
+    def diagnostics(self) -> dict:
+        """Driver facts for the run summary (calibration results, assists, ...); optional."""
+        return {}
+
     def stop(self) -> None:
         pass
 
@@ -222,15 +226,58 @@ def summarize(rows: list[dict], runtime: PolicyRuntime, car: CarInterface, overr
         betas = np.array([abs(math.degrees(math.atan2(r["s_vel_y"], abs(r["s_vel_x"])))) for r in half])
         speeds = np.array([math.hypot(r["s_vel_x"], r["s_vel_y"]) for r in half])
     grips = [r["grip_est"] for r in half if r["grip_est"] is not None]
+    steer = np.array([r["steer"] for r in half])
+    thr = np.array([r["throttle"] for r in half])
+    raw = np.array([r["raw_steer"] for r in half])
+    d_steer = np.diff(steer)
     out = dict(steps=len(rows), seconds=round(len(rows) * runtime.control_dt, 2), ended_early=bool(car.done()),
                target_beta_deg=round(math.degrees(runtime.target_beta), 1), target_speed=round(runtime.target_speed, 2),
                mean_abs_beta_deg_2nd_half=round(float(betas.mean()), 1), mean_speed_2nd_half=round(float(speeds.mean()), 2),
                override_share=round(float(np.mean([r["override"] > 0.01 for r in rows])), 4),
                max_compute_ms=round(max(r["compute_ms"] for r in rows), 3), realtime_overruns=overruns,
-               grip_estimate_2nd_half=round(float(np.mean(grips)), 3) if grips else None)
+               grip_estimate_2nd_half=round(float(np.mean(grips)), 3) if grips else None,
+               beta_std_deg_2nd_half=round(float(betas.std()), 2), speed_std_2nd_half=round(float(speeds.std()), 3))
+    if len(half) > 2:                                 # smoothness: mean command change per control step
+        sig = np.sign(d_steer[np.abs(d_steer) > 0.01])        # direction of the real steering moves
+        out["smoothness"] = dict(
+            steer_step=round(float(np.abs(d_steer).mean()), 4), throttle_step=round(float(np.abs(np.diff(thr)).mean()), 4),
+            raw_steer_step=round(float(np.abs(np.diff(raw)).mean()), 4),
+            steer_reversals_per_s=round(float(np.sum(sig[1:] != sig[:-1])) / (len(half) * runtime.control_dt), 2))
     if "true_grip_true" in rows[0]:
         out["grip_true_2nd_half"] = round(float(np.mean([r["true_grip_true"] for r in half])), 3)
+    diag = car.diagnostics()
+    if diag:
+        out["car"] = diag
+    notes = advice(out, runtime)
+    if notes:
+        out["advice"] = notes
     return out
+
+
+def advice(summary: dict, runtime: PolicyRuntime) -> list[str]:
+    """Plain-language hints from a run summary (what to change when the drift is not smooth)."""
+    notes: list[str] = []
+    car = summary.get("car", {})
+    g = summary.get("grip_estimate_2nd_half")
+    levels = (runtime.meta.get("evaluation") or {}).get("levels") or []
+    grips = [lv["grip"] for lv in levels if "grip" in lv]
+    lo, hi = (min(grips), max(grips)) if grips else (None, None)
+    if g is not None and hi is not None and g > 1.1 * hi:
+        notes.append(f"the grip estimate {g:.2f} is above the trained range ({lo:.2f}-{hi:.2f}): the surface or tires are "
+                     "too grippy for this policy; use slippery tires / a low-grip surface")
+    if car.get("esc_active_share", 0) > 0.02 or car.get("tcs_active_share", 0) > 0.02:
+        notes.append("BeamNG's ESC / traction control acted during the run; switch it off or pick a configuration without it")
+    if car.get("gear_changes", 0) > 2:
+        notes.append(f"the gearbox shifted {car['gear_changes']} times; fix a gear (--gear 2) so the drive does not cut out")
+    if car.get("steer_saturated_share", 0) > 0.05:
+        notes.append("the policy asked for more steering than the BeamNG car has; use a car / steering rack with more lock")
+    if summary.get("override_share", 0) > 0.1:
+        notes.append("the safety filter took over often: the car is near spinning; check the grip, steering lock and speed")
+    sm = summary.get("smoothness", {})
+    if sm.get("steer_reversals_per_s", 0) > 8:
+        notes.append("the steering reverses direction very often (chatter): train with the smoothness settings "
+                     "(ppo.smooth_temporal / smooth_spatial) or raise the action-rate penalty")
+    return notes
 
 
 def load_car(spec: str, args: argparse.Namespace, meta: dict) -> CarInterface:
@@ -242,10 +289,12 @@ def load_car(spec: str, args: argparse.Namespace, meta: dict) -> CarInterface:
         return SimCar(meta, grip=args.grip, seed=args.seed, grip_change=gc, drift_start=args.drift_start)
     if spec == "beamng":
         from .beamng import BeamNGCar
+        gains = tuple(float(x) for x in args.motor_gains.split(",")) if args.motor_gains else None
         return BeamNGCar(meta, home=args.beamng_home, host=args.beamng_host, port=args.beamng_port, user=args.beamng_user,
                          level=args.level, model=args.vehicle, part_config=args.part_config, scale=args.scale,
                          steer_lock_deg=args.steer_lock_deg, throttle_gain=args.throttle_gain, launch=not args.no_launch,
-                         wheel_key=args.wheel_key, gear=args.gear)
+                         wheel_key=args.wheel_key, gear=args.gear, throttle_mode=args.throttle_mode, assists=args.assists,
+                         calibrate=not args.no_calibrate, motor_gains=gains)
     if spec == "hardware":
         return HardwareCar()
     mod, _, cls = spec.partition(":")
@@ -280,9 +329,15 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--part-config", default=None, help="vehicle configuration (.pc path), e.g. a rear-drive drift setup")
     b.add_argument("--scale", default="auto", help="size ratio BeamNG car / trained car (auto: from the bounding box; 1 = RC mod)")
     b.add_argument("--steer-lock-deg", type=float, default=None, help="road-wheel angle of full BeamNG steering (default: as trained)")
-    b.add_argument("--throttle-gain", type=float, default=1.0, help="BeamNG throttle per unit policy throttle")
-    b.add_argument("--wheel-key", default="wheelspeed", help="electrics value used as the driven-wheel speed")
-    b.add_argument("--gear", type=int, default=None, help="force a gear (e.g. 1 or 2) if the car does not move")
+    b.add_argument("--throttle-mode", default="motor", choices=["motor", "direct"],
+                   help="motor: emulate the RC motor (rear-wheel speed servo, fixed gear); direct: raw throttle")
+    b.add_argument("--throttle-gain", type=float, default=1.0, help="direct mode: BeamNG throttle per unit policy throttle")
+    b.add_argument("--motor-gains", default=None, help="motor mode: KP,KI,KB of the wheel-speed servo (default 1.5,6,0.5)")
+    b.add_argument("--assists", default="off", choices=["off", "keep"], help="switch BeamNG's ESC / traction control off")
+    b.add_argument("--wheel-key", default="auto",
+                   help="auto: rear wheels from the vehicle's Lua (else Electrics wheelspeed); or an Electrics value")
+    b.add_argument("--gear", default=None, help="fixed gear (default 2 in motor mode) or 'auto' for BeamNG's gearbox")
+    b.add_argument("--no-calibrate", action="store_true", help="skip the start-up steering / wheel-speed calibration")
     a = ap.parse_args(argv)
     car_cfg = json.loads(Path(a.car_config).read_text()) if a.car_config else None
     rt = PolicyRuntime(a.model, car=car_cfg, safety=json.loads(a.safety) if a.safety else None)
