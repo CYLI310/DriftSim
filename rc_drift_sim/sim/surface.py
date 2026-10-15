@@ -1,12 +1,11 @@
-"""Per-wheel surface parameters (Milestone 1: uniform surface only).
+"""Per-wheel surface parameters.
 
-Milestone 1 scope: the whole track is one surface type. ``uniform_surface`` broadcasts a
-scalar :class:`SurfaceParams` to one value per wheel so that the tire and vehicle code are
-already written per wheel (wheel order FL, FR, RL, RR; per-wheel arrays have shape (4,)).
+``uniform_surface`` broadcasts a scalar :class:`SurfaceParams` to one value per wheel; the tire
+and vehicle code are written per wheel (wheel order FL, FR, RL, RR; per-wheel arrays have shape (4,)).
 
-Milestone 2 replaces the uniform surface with a 2D surface-map lookup at the four contact
-points; ``blend_surfaces`` (gradual transitions between two surface types) and ``per_wheel``
-(a different surface under each wheel) are the building blocks that lookup will use.
+``blend_surfaces`` (a transition between two surface types) and ``per_wheel`` (a different
+surface under each wheel) build static per-wheel surfaces. A surface that changes as the car
+drives, with friction patches, bumps and slopes, is a ``surface_map.SurfaceMap`` (Milestone 2).
 
 All functions are pure, allocate new arrays (no in-place mutation) and use NumPy float64.
 Only the fields listed in ``SurfaceParams.NUMERIC_FIELDS`` are numeric; ``name`` and
@@ -55,7 +54,7 @@ def blend_surfaces(a: SurfaceParams, b: SurfaceParams, w) -> SurfaceParams:
         Blend weight per wheel, dimensionless, 0 = pure ``a`` ... 1 = pure ``b``.
 
     The result carries ``name = "<a.name>~<b.name>"`` and the color of ``a``.
-    Milestone 2 uses this for gradual transitions at surface boundaries.
+    ``surface_map`` blends the same way over one cell at map boundaries.
     """
     w_arr = np.array(np.broadcast_to(np.asarray(w, dtype=np.float64), (N_WHEELS,)),
                      dtype=np.float64)

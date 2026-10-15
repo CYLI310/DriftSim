@@ -10,14 +10,16 @@ RK4/semi-implicit integrator) on a uniform or per-wheel surface, a batch-capable
 trim / stability / LQR analysis module, a stiffness guard, a matplotlib top-down visualizer +
 time-series plots, and the pytest suite. Surface MAPS, roughness, sensors, the Gym env, JAX and
 training come in later milestones; every interface already carries the hooks they need.
+Milestone 2 (section 5b) adds surface maps: per-wheel surface lookup, friction patches, roughness
+bumps and slopes.
 
 ## 0. Repository layout
 
 ```
 rc_drift_sim/
   configs/              vehicle.yaml, tires.yaml, surfaces.yaml (all default values)
-  sim/                  params, state, tire, surface, drivetrain, actuators, vehicle, integrator,
-                        equilibrium (trims, linearization), stability (stiffness guard)
+  sim/                  params, state, tire, surface, surface_map, drivetrain, actuators, vehicle,
+                        integrator, equilibrium (trims, linearization), stability (stiffness guard)
   control/              maneuvers (open-loop schedules), lqr (TrimLQR, LQRDriftPolicy)
   datagen/              batch dataset generation (catalog, spec, sampling, inputs, runner, export)
   app/                  web GUI: server.py (stdlib HTTP server + JSON API), static/ (page, no build step)
@@ -90,8 +92,8 @@ the YAML defaults. All dataclasses are frozen; use `dataclasses.replace` to vary
 
 Per-wheel surface: functions take `surf` = a `SurfaceParams` whose numeric fields are arrays of
 shape (4,) (one value per wheel). `surface.uniform_surface(sp)` broadcasts a scalar surface to
-four wheels. Milestone 2 replaces this with a map lookup; the tire and vehicle code must already
-be written per-wheel.
+four wheels. Milestone 2 adds the map lookup on top (section 5b); the tire and vehicle code are
+written per wheel.
 
 ## 4. Tire model (`sim/tire.py`)
 
@@ -222,7 +224,7 @@ Loads:
     Fz = Fz_static + [-1,-1,+1,+1]*DFZ_LONG/2 + [-rf, +rf, -(1-rf), +(1-rf)]*DFZ_LAT,  rf = roll_stiffness_front
     Fz = max(Fz, 0)
 Fz uses the lag STATES; the targets use the forces computed in the same evaluation (no algebraic
-loop). Milestone 2 adds roughness noise and slope terms here.
+loop). With a surface map (section 5b) the loads are then multiplied by the roughness bumps.
 
 Body:
     per-wheel tire force in the wheel frame (Fx_i, Fy_i) -> body frame with delta_i:
@@ -262,6 +264,63 @@ bit-identical to simulating it alone (tests/test_batch.py); `rc_drift_sim.datage
     Vehicle() runs sim.stability.check_stiffness and warns when dt is too large for the config.
     .rollout(s0, actions (T,2) or callable(t, s, info)->action, control_dt) -> Trajectory
         Trajectory holds arrays: t, states (T+1, NS), actions (T,2), and stacked info dict.
+
+## 5b. Surface maps (`sim/surface_map.py`, Milestone 2)
+
+`SurfaceMap(surfaces, labels (ny, nx), cell, origin, outside, height=None, seed, patch_size,
+bump_size, mu_patches, bumps)`: a grid of surface labels over a world rectangle (row 0 = smallest
+y). Constructors `uniform`, `from_labels`, `from_function(fn(x, y) -> label, extent, cell,
+height_fn)` and `from_ascii(rows, legend, cell)` (first text row = top). `Vehicle`, `VehicleBatch`,
+`compile_model(_batch)` and `make_vehicle` take an optional `surface_map=`; all cars of a batch
+share it. Without a map nothing changes (same operations, bit-identical results).
+
+Lookup. In every `derivatives_model` evaluation the four contact points
+`(X, Y) + R(psi) (x_i, y_i)` are looked up in the compiled map (`MapModel`): cell-center values
+bilinearly interpolated, one ring of `outside` cells around the map, clamped beyond it. A surface
+boundary is therefore a linear ramp one cell wide (the spatial form of `blend_surfaces`). The
+lookup is plain array indexing, so the PyTorch path (`xp.to_device`) runs it unchanged.
+
+Channels per cell (all linear in the surface fields, `CHANNELS`): `mu = mu_scale * patch`,
+`mu_loose = mu_scale * looseness * patch`, `stiffness_scale`, `shape_blend`,
+`shape_blend * shape_c_target`, `curvature_e_shift`, `peak_slip_shift`, `rolling_resistance`,
+`loose_drag`, `roughness`, `dh/dx`, `dh/dy`. `tire_on_map` rebuilds the surface-dependent
+`TireModel` fields per wheel with the `tire_model` expressions and the per-car constants `MapTire`
+(compound `loose_affinity`, `pcx1`, `pcy1` and the static wear / wetness multipliers):
+
+    mu_scale = (mu + loose_affinity * mu_loose) * lam_mu
+    k_scale  = stiffness * lam_k
+    C        = min(pc1 + blend_c - blend * pc1 + dC, C_MAX)     (x and y)
+    slip_scale = 1 + peak_slip_shift;  e_shift, crr, loose_drag as interpolated
+
+On a one-surface map without patches and bumps this equals the uniform surface to rounding
+(test). Interpolating these channels is not identical to `blend_surfaces` followed by
+`tire_model` inside a transition cell (products such as `mu_scale * looseness` are blended as
+products); both are models of a contact patch on mixed ground.
+
+Friction patches: `mu` and `mu_loose` are multiplied at compile time by
+`max(1 + mu_patch_std * z, 0.2)`, `z` a unit-std field (iid normals on a lattice of spacing
+`patch_size`, bilinearly interpolated, scaled by 1.5 to unit std). Same `seed`, same ground.
+
+Roughness: `Fz_i *= max(1 + roughness_i * n(X_i, Y_i), 0)` with `n` a unit-std bilinear noise on a
+`BUMP_TILE` x `BUMP_TILE` tile of spacing `bump_size` (default 3 cm; the tile repeats every
+7.7 m). The bumps are fixed to the ground, so the load noise a tire feels scales with its speed and
+a parked car feels none. The multiplier is in `info["fz_factor"]`.
+
+Slopes: an optional `height` (m, at the cell centers; flat beyond the map) gives `grad h` by central
+differences. The downhill gravity component, small-slope and averaged over the four contacts,
+
+    a_slope = -g * R(-psi) grad h,
+
+is added to `dvx, dvy` only. It is not part of the specific force `ax, ay`: the IMU and the
+load-transfer targets see the slope through the tire forces that resist it (on a slope at rest
+`ax = g sin(theta)` from the tires, giving the correct `m g sin(theta) h / L` load shift). The
+`cos(theta)` reduction of the normal load is neglected. `info["a_slope"]` is (..., 2).
+
+Extra `info` keys with a map: `mu_surface` (..., 4) (surface x patch x static condition),
+`fz_factor` (..., 4), `a_slope` (..., 2). Cost: a mixed map with bumps makes one right-hand-side
+evaluation about 1.6x as expensive (single car and 4096-car batches). `SurfaceMap.draw(ax)` /
+`.image()` render the map (low-mu patches darker, slopes hill-shaded) and
+`viz.render.draw_background` uses it via `surf_map=`.
 
 ## 6. Drivetrain (`sim/drivetrain.py`)
 
@@ -433,6 +492,13 @@ Required checks (the "item N" references in the test docstrings):
 - test_drift: open-loop drift (|beta| in (20, 80) deg, v > 0.8 m/s for >= 1.5 s, never spinning),
   drift equilibrium exists with exactly one unstable real mode, LQR captures and holds a drift from
   a real entry, and holds it under five kinds of model mismatch.
+- test_surface_map: uniform map == uniform surface (paved, loose with plowing, ice; worn and
+  wet tires), one-hot channels reproduce `tire_model(per_wheel(...))`, interpolation at centers /
+  midpoints / outside, continuity across a boundary, ascii orientation, validation errors, patch
+  spread / floor / seed determinism, bump statistics and correlation length, bumps only on rough
+  ground, slope acceleration in the body frame with the IMU unaffected, a parked car rolls
+  downhill, split-mu launch yaws away from the ice, driving onto ice drops lateral acceleration,
+  batch == single car and PyTorch == NumPy on a mixed map, drawing.
 - test_stability: every shipped configuration is stable at dt = 1 ms; a too-stiff coupling is
   caught and really diverges.
 - test_benchmark (marked): single-env substeps/s and batched env-steps/s.

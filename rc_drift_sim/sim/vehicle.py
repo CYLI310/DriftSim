@@ -23,20 +23,25 @@ Python branching on array values; Python control flow only on configuration).
 
 Public API
 ----------
-    compile_model(params, surf=None, cond=None) -> VehicleModel     precomputed constants
+    compile_model(params, surf=None, cond=None, surface_map=None) -> VehicleModel   constants
     derivatives_model(s, u, vm, want_info=False) -> (ds, info|None)   fast batch-capable core
     derivatives(s, u, p, surf, cond) -> (ds, info)                    contract API (cached model)
     rhs(s, u, p, surf, cond) -> ds, rhs_model(s, u, vm) -> ds          integrator adapters
     Trajectory                                                         t, states, actions, info
-    Vehicle(params, surf=None, cond=None)
+    Vehicle(params, surf=None, cond=None, surface_map=None)
         .initial_state(x=0, y=0, yaw=0, v=0, beta=0, yaw_rate=0) -> s
         .step(s, action, n_sub=None, want_info=True) -> (s_new, info)   s (NS,) or (B, NS)
         .rollout(s0, actions, control_dt=None, n_steps=None, duration=None, t0=0.0) -> Trajectory
         .rollout_batch(s0 (B,NS), actions (T,B,2), record_info=False) -> (states (T+1,B,NS), info)
-    compile_model_batch(params_list, surfs, conds) -> VehicleModel   B cars, different parameters
-    VehicleBatch(params_list, surfs=None, conds=None)
+    compile_model_batch(params_list, surfs, conds, surface_map=None) -> VehicleModel   B cars
+    VehicleBatch(params_list, surfs=None, conds=None, surface_map=None)
         .initial_states(...) -> (B, NS), .step(s, u, want_info=False) -> (s_new, info)
-    make_vehicle(tire="hard_plastic_drift", surface="epoxy_ptile", **overrides) -> Vehicle
+    make_vehicle(tire="hard_plastic_drift", surface="epoxy_ptile", surface_map=None, **overrides)
+
+Surface maps (Milestone 2): with a ``surface_map.SurfaceMap`` the surface under each wheel, the
+friction patches, the roughness bumps and the slope are looked up at the contact points in every
+right-hand-side evaluation (``surface_map`` module docstring). Without one the model is the uniform
+per-wheel surface of Milestone 1, unchanged.
 """
 from __future__ import annotations
 
@@ -51,6 +56,8 @@ from .params import Params, SurfaceParams, TireCondition, default_params
 from .state import (ALPHA_LAG, CONTAM, DELTA, DFZ_LAT, DFZ_LONG, I_MOTOR, KAPPA_LAG, NS, OMEGA,
                     R, T_TIRE, VX, VY, X, Y, YAW)
 from .surface import uniform_surface
+from .surface_map import (GRAD_X, GRAD_Y, LOOSE_DRAG, ROUGH, SurfaceMap, compile_map, lookup_m, map_tire,
+                          tire_on_map)
 from .xp import namespace
 
 # ``derivatives`` assembles ``ds`` by concatenation in the canonical order; make sure the
@@ -102,24 +109,35 @@ class VehicleModel:
     front: np.ndarray         # (4,) 1 on the front (steered) wheels, 0 on the rear
     rear: np.ndarray          # (4,) 1 - front
     parallel_steer: bool      # ackermann == 0 (configuration flag: cheaper steer trig)
+    gravity: float = 9.81     # m/s^2 (slopes of a surface map)
+    smap: Any = None          # surface_map.MapModel, shared by a batch; None = uniform surface
+    smap_tire: Any = None     # surface_map.MapTire: per-car constants for the map lookup
 
 
 def compile_model(params: Params, surf: SurfaceParams | None = None,
-                  cond: TireCondition | None = None) -> VehicleModel:
+                  cond: TireCondition | None = None, surface_map: SurfaceMap | None = None
+                  ) -> VehicleModel:
     """Precompute a :class:`VehicleModel`.
 
     ``surf`` defaults to ``uniform_surface(params.surface)``; ``cond`` to a neutral condition
     (new, dry, clean tires). Temperature and contamination are STATES and act dynamically;
     ``cond`` contributes the static wear and wetness factors (and the initial state values via
-    ``Vehicle.initial_state``).
+    ``Vehicle.initial_state``). With a ``surface_map`` the map replaces ``surf`` at every contact
+    point (``surf`` then only sets the defaults the map overrides).
     """
     vp, sim = params.vehicle, params.sim
     surf = uniform_surface(params.surface) if surf is None else surf
     pos = vp.wheel_positions()
     rf = float(vp.roll_stiffness_front)
+    tm = tire.tire_model(params.tire, surf, cond)
+    smap = smap_tire = None
+    if surface_map is not None:
+        smap = compile_map(surface_map)
+        smap_tire = map_tire(params.tire, cond)
+        tm = dataclasses.replace(tm, has_plow=tm.has_plow or bool(np.any(smap.grid[:, LOOSE_DRAG] != 0.0)))
     return VehicleModel(
         params=params,
-        tm=tire.tire_model(params.tire, surf, cond),
+        tm=tm,
         ls=tire.low_speed_consts(sim),
         dm=drivetrain.drivetrain_model(params.drivetrain, vp),
         am=actuators.actuator_model(params.actuators),
@@ -137,6 +155,7 @@ def compile_model(params: Params, surf: SurfaceParams | None = None,
         ackermann=float(vp.ackermann),
         v_eps=float(sim.v_eps), inv_v_rr=1.0 / float(sim.v_rr), t_amb=float(sim.ambient_temp),
         front=_FRONT.copy(), rear=_REAR.copy(), parallel_steer=float(vp.ackermann) == 0.0,
+        gravity=float(sim.gravity), smap=smap, smap_tire=smap_tire,
     )
 
 
@@ -147,6 +166,7 @@ def compile_model(params: Params, surf: SurfaceParams | None = None,
 _WHEEL_FLOATS = {  # float fields used against per-wheel arrays -> stacked to (B, 1)
     "VehicleModel": {"Rw", "v_eps", "inv_v_rr", "t_amb"},
     "TireModel": "all", "LowSpeed": "all", "DrivetrainModel": set(), "ActuatorModel": set(),
+    "MapTire": "all",
 }
 _SHARED = {  # structural fields that must be identical across the batch
     "TireModel": {"mode", "use_temp"}, "DrivetrainModel": {"front_driven", "reverse_enabled", "driven"},
@@ -193,12 +213,14 @@ def _stack_fields(objs: list, kind: str, skip: tuple = ()) -> Any:
 
 
 def compile_model_batch(params_list: list[Params], surfs: list[SurfaceParams] | None = None,
-                        conds: list[TireCondition | None] | None = None) -> VehicleModel:
+                        conds: list[TireCondition | None] | None = None,
+                        surface_map: SurfaceMap | None = None) -> VehicleModel:
     """One ``VehicleModel`` for B cars with different numeric parameters (mass, tire compound,
     surface, wear, latency-free actuator settings, gearing, ...), stepped together on (B, NS) states.
 
     Structural settings (``STRUCTURAL``: combined-slip mode, drivetrain layout, reverse enable,
     time steps, integrator) must be identical across the batch; group cars by them first.
+    All cars drive on the same ``surface_map`` (if given).
     """
     B = len(params_list)
     if B == 0:
@@ -211,10 +233,11 @@ def compile_model_batch(params_list: list[Params], surfs: list[SurfaceParams] | 
         vals = {getattr(getattr(p, g), f) for p in params_list}
         if len(vals) > 1:
             raise ValueError(f"{key} must be shared across a batch, got {sorted(map(str, vals))}")
-    models = [compile_model(p, s, c) for p, s, c in zip(params_list, surfs, conds)]
-    vm = _stack_fields(models, "VehicleModel", skip=("params", "tm", "ls", "dm", "am"))
+    models = [compile_model(p, s, c, surface_map) for p, s, c in zip(params_list, surfs, conds)]
+    vm = _stack_fields(models, "VehicleModel", skip=("params", "tm", "ls", "dm", "am", "smap", "smap_tire"))
     return dataclasses.replace(
         vm, params=ref,
+        smap_tire=None if surface_map is None else _stack_fields([m.smap_tire for m in models], "MapTire"),
         tm=_stack_fields([m.tm for m in models], "TireModel"),
         ls=_stack_fields([m.ls for m in models], "LowSpeed"),
         dm=_stack_fields([m.dm for m in models], "DrivetrainModel"),
@@ -301,6 +324,25 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
     Fz = xp.maximum(vm.fz_static + vm.long_pat * dfz_long[..., None]
                     + vm.lat_pat * dfz_lat[..., None], 0.0)
 
+    # --- surface map: surface, friction patches, bumps and slope at the four contact points
+    if vm.smap is not None:                               # configuration branch
+        cw, sw = xp.cos(psi)[..., None], xp.sin(psi)[..., None]
+        xc = s[..., X][..., None] + cw * vm.xi - sw * vm.yi
+        yc = s[..., Y][..., None] + sw * vm.xi + cw * vm.yi
+        ch, bump = lookup_m(vm.smap, xc, yc)
+        tm = tire_on_map(tm, vm.smap_tire, ch)
+        if vm.smap.has_bumps:
+            fz_factor = xp.maximum(1.0 + ch[..., ROUGH] * bump, 0.0)
+            Fz = Fz * fz_factor
+        else:
+            fz_factor = xp.ones_like(Fz)
+        if vm.smap.has_slope:                             # downhill gravity, mean of the contacts
+            gxm = xp.sum(ch[..., GRAD_X], axis=-1) * 0.25
+            gym = xp.sum(ch[..., GRAD_Y], axis=-1) * 0.25
+            c0, s0 = cw[..., 0], sw[..., 0]
+            a_slope_x = -vm.gravity * (c0 * gxm + s0 * gym)
+            a_slope_y = -vm.gravity * (c0 * gym - s0 * gxm)
+
     # --- tire friction forces (wheel frame) on the LAGGED slips
     (Fx, Fy, c, w_low, vsx, vsy, v_wheel,
      F_mf_x, F_mf_y, F_low_x, F_low_y) = tire.forces_model(
@@ -345,9 +387,12 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
     dT = (heating - cooling) * tm.inv_heat_capacity
     dcontam = -(v_wheel * tm.inv_contam_dist) * contam
 
+    dvx, dvy = ax + vy * r, ay - vx * r
+    if vm.smap is not None and vm.smap.has_slope:         # gravity is not part of the specific force
+        dvx, dvy = dvx + a_slope_x, dvy + a_slope_y
     ds = xp.concatenate([
         xp.stack([vx * cpsi - vy * spsi, vx * spsi + vy * cpsi, r,
-                  ax + vy * r, ay - vx * r, Mz * vm.inv_iz], axis=-1),  # X Y YAW VX VY R
+                  dvx, dvy, Mz * vm.inv_iz], axis=-1),                 # X Y YAW VX VY R
         domega,                                                          # OMEGA (4)
         xp.stack([xp.broadcast_to(ddelta, di.shape), di], axis=-1),      # DELTA I_MOTOR
         dT,                                                              # T_TIRE (4)
@@ -372,6 +417,11 @@ def derivatives_model(s: np.ndarray, u: np.ndarray, vm: VehicleModel, want_info:
         dfz_long_target=vm.lt_long * ax, dfz_lat_target=vm.lt_lat * ay,
         slip_power=xp.sum(heating, axis=-1),
     )
+    if vm.smap is not None:
+        info["mu_surface"] = tm.mu_scale                  # surface x patch x static condition, per wheel
+        info["fz_factor"] = fz_factor                     # bump multiplier on the wheel loads
+        info["a_slope"] = (xp.stack([a_slope_x, a_slope_y], axis=-1) if vm.smap.has_slope
+                           else xp.zeros_like(info["F_aero"]))
     return ds, info
 
 
@@ -503,10 +553,11 @@ def stack_info(infos: list[dict[str, np.ndarray]]) -> dict[str, np.ndarray]:
 class Vehicle:
     """Convenience wrapper: parameters + surface + tire condition, control-rate stepping, rollouts.
 
-    ``Vehicle(params, surf=None, cond=None)``: ``surf`` defaults to
+    ``Vehicle(params, surf=None, cond=None, surface_map=None)``: ``surf`` defaults to
     ``uniform_surface(params.surface)`` (one value per wheel), ``cond`` to
-    ``TireCondition.neutral(params.sim.ambient_temp)``. The physics constants are compiled once
-    (``self.model``); every step uses the fast core ``derivatives_model``.
+    ``TireCondition.neutral(params.sim.ambient_temp)``. A ``surface_map`` (``surface_map.SurfaceMap``)
+    replaces the uniform surface with a lookup at the contact points. The physics constants are
+    compiled once (``self.model``); every step uses the fast core ``derivatives_model``.
 
     The control latency buffer (``actuators.ActionDelay``) is NOT applied here: ``step`` and
     ``rollout`` apply the action they are given immediately, with a zero-order hold over the
@@ -519,13 +570,17 @@ class Vehicle:
     """
 
     def __init__(self, params: Params, surf: SurfaceParams | None = None,
-                 cond: TireCondition | None = None) -> None:
+                 cond: TireCondition | None = None, surface_map: SurfaceMap | None = None) -> None:
         self.params = params
         self.surf = uniform_surface(params.surface) if surf is None else surf
         self.cond = TireCondition.neutral(params.sim.ambient_temp) if cond is None else cond
-        self.model = compile_model(params, self.surf, self.cond)
+        self.surface_map = surface_map
+        self.model = compile_model(params, self.surf, self.cond, surface_map)
         from .stability import check_stiffness
         self.stiffness = check_stiffness(params, self.surf)      # warns if dt is too large
+        if surface_map is not None:                               # and on every surface of the map
+            for sp in surface_map.surfaces:
+                check_stiffness(params, uniform_surface(sp))
 
     # -- shorthands
     @property
@@ -677,20 +732,23 @@ class Vehicle:
 class VehicleBatch:
     """B cars with (possibly) different numeric parameters, stepped together.
 
-    ``VehicleBatch(params_list, surfs=None, conds=None)``: one entry per car; ``surfs`` default to
-    ``uniform_surface(params.surface)`` and ``conds`` to a neutral condition, per car. Structural
-    settings (``STRUCTURAL``) must be shared. Like ``Vehicle``, no control latency is applied here.
+    ``VehicleBatch(params_list, surfs=None, conds=None, surface_map=None)``: one entry per car;
+    ``surfs`` default to ``uniform_surface(params.surface)`` and ``conds`` to a neutral condition, per
+    car; all cars share the optional ``surface_map``. Structural settings (``STRUCTURAL``) must be
+    shared. Like ``Vehicle``, no control latency is applied here.
     """
 
     def __init__(self, params_list: list[Params], surfs: list[SurfaceParams] | None = None,
-                 conds: list[TireCondition | None] | None = None, check_stiffness: bool = True) -> None:
+                 conds: list[TireCondition | None] | None = None, check_stiffness: bool = True,
+                 surface_map: SurfaceMap | None = None) -> None:
         self.params_list = list(params_list)
         B = len(self.params_list)
         self.surfs = [uniform_surface(p.surface) if s is None else s
                       for p, s in zip(self.params_list, surfs or [None] * B)]
         self.conds = [TireCondition.neutral(p.sim.ambient_temp) if c is None else c
                       for p, c in zip(self.params_list, conds or [None] * B)]
-        self.model = compile_model_batch(self.params_list, self.surfs, self.conds)
+        self.surface_map = surface_map
+        self.model = compile_model_batch(self.params_list, self.surfs, self.conds, surface_map)
         self.params = self.params_list[0]
         if check_stiffness:
             from .stability import stiffness_report
@@ -789,18 +847,19 @@ def _apply_overrides(p: Params, overrides: Mapping[str, Any]) -> Params:
 
 
 def make_vehicle(tire: str = "hard_plastic_drift", surface: str = "epoxy_ptile",
-                 config_dir: Any = None, **overrides: Any) -> Vehicle:
+                 config_dir: Any = None, surface_map: SurfaceMap | None = None, **overrides: Any) -> Vehicle:
     """``Vehicle`` from the YAML defaults (``params.default_params``) with optional overrides.
 
     ``tire`` / ``surface`` name a compound in ``tires.yaml`` and a surface in ``surfaces.yaml``.
     ``overrides`` are either group dicts (``sim=dict(dt=0.002)``, ``drivetrain=dict(layout="awd_spool")``),
     replacement group instances (``sim=SimParams(...)``) or unique bare field names
-    (``mass=1.8``, ``integrator="semi_implicit_euler"``).
+    (``mass=1.8``, ``integrator="semi_implicit_euler"``). ``surface_map`` drives the car on a
+    ``surface_map.SurfaceMap`` instead of the uniform ``surface``.
     """
     p = default_params(tire=tire, surface=surface, config_dir=config_dir)
     if overrides:
         p = _apply_overrides(p, overrides)
-    return Vehicle(p)
+    return Vehicle(p, surface_map=surface_map)
 
 
 __all__ = ["VehicleModel", "compile_model", "compile_model_batch", "derivatives_model", "derivatives",

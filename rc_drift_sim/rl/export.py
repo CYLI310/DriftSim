@@ -77,7 +77,17 @@ def nominal_car(cfg: EnvConfig) -> dict:
     return dict(steer_max_deg=math.degrees(float(p.actuators.steer_max)), cg_to_front=float(p.vehicle.cg_to_front),
                 wheelbase=float(p.vehicle.wheelbase), track_width=float(p.vehicle.track_width),
                 body_length=float(p.vehicle.body_length), mass=float(p.vehicle.mass),
-                wheel_radius=float(p.vehicle.wheel_radius), latency=float(p.actuators.latency))
+                wheel_radius=float(p.vehicle.wheel_radius), latency=float(p.actuators.latency), **motor_line(p))
+
+
+def motor_line(p) -> dict:
+    """The RC motor + ESC as the BeamNG driver emulates it: rear-wheel surface speed at full throttle
+    without load (m/s), the ESC deadband and the current-limited drive force in g."""
+    d, v = p.drivetrain, p.vehicle
+    v0 = float(d.motor_kv) * float(d.battery_voltage) * 2.0 * math.pi / 60.0 / float(d.gear_ratio) * float(v.wheel_radius)
+    kt = 60.0 / (2.0 * math.pi * float(d.motor_kv))
+    a_max = float(d.current_limit) * kt * float(d.gear_ratio) / float(v.wheel_radius) / (float(v.mass) * 9.81)
+    return dict(motor_noload_speed=v0, throttle_min=float(d.throttle_min), motor_max_accel_g=a_max)
 
 
 def _sample_obs(cfg: EnvConfig, model: ActorCritic, n_steps: int = 60, n_cars: int = 16) -> np.ndarray:
@@ -271,4 +281,4 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["export_final", "DeployPolicy", "numpy_forward", "nominal_car", "FORMAT"]
+__all__ = ["export_final", "DeployPolicy", "numpy_forward", "nominal_car", "motor_line", "FORMAT"]

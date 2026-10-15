@@ -144,16 +144,44 @@ safe-adaptive`) turns on everything below. Each piece is also a plain setting.
 | `PPOConfig.privileged_critic` | the critic also sees `env.last_priv` (velocities, wheel speeds, steering angle, motor current, loads, slips, tire temperatures, true grip, latency) |
 | `PPOConfig.eval_every` | every N iterations `rl.evaluation.GripSweep` scores the deterministic policy on `eval_grip_levels` (surface grip multipliers; `eval_cars` cars each, parked start, nominal targets); the best becomes `best.pt` |
 | `PPOConfig.lr_schedule` | `linear` decays the learning rate to the end |
+| `PPOConfig.smooth_temporal`, `smooth_spatial`, `smooth_sigma` | CAPS smoothness: the mean action may change little between consecutive observations of an episode and between an observation and a copy with `smooth_sigma` (normalized) noise; see below |
 
 The low-friction randomization of the preset (`rl.presets.LOW_FRICTION_RANDOMIZE`) draws one of three
 hard floors (epoxy P-tile, polished concrete, wet asphalt), scales its grip 0.3-1.3x and its stiffness
-0.7-1.2x, adds dust and wear, and varies mass, motor, steering offset and latency. With the plastic
+0.7-1.2x, adds dust and wear, and varies mass, motor, steering lock (±10 %), servo speed and lag, CG
+height, steering offset and latency. With the plastic
 drift tires the peak friction coefficient spans about 0.09-0.46; drift equilibria at 30° and 1.5 m/s
 exist over that whole range, but the steering they need roughly doubles from the grippiest to the
 most slippery surface, which is what the policy has to adapt to.
 
 `rl.export` (`driftsim-export`) writes the final model; `rc_drift_sim.deploy` runs it on the car, in
 DriftSim or in BeamNG: [DEPLOY.md](DEPLOY.md).
+
+### Smooth actions
+
+A policy trained only with the reward's action-rate penalty drives with a fast, small steering
+chatter: that penalty acts on the sampled (noisy) actions, where the exploration noise dominates it,
+not on the deterministic policy the car drives. The CAPS terms (Mysore et al., ICRA 2021) regularize
+the policy mean directly: `smooth_temporal` x |μ(s_t) − μ(s_t+1)|² over consecutive steps of the same
+episode and `smooth_spatial` x |μ(s) − μ(s + ε)|² with ε ~ N(0, `smooth_sigma`) in normalized
+observation units. `log.jsonl` reports both terms per iteration.
+
+Measured on the safe-adaptive setup (6 M steps on MPS each, best policy of the grip sweep, driven
+through the on-car runtime in DriftSim at grip x0.5 / 0.8 / 1.1, two seeds each, second half of 10 s;
+the two smoothed runs also had the preset's wider steering / servo / CG randomization, which makes
+the task harder, not smoother):
+
+| | sweep score | steer change / step | throttle change / step | sideslip held (command 30°) |
+|---|---|---|---|---|
+| no smoothness terms | 513 | 0.11-0.14 | 0.09-0.14 | 23-29° ± 2.1-3.1° |
+| `smooth_temporal` 1.0, `smooth_spatial` 0.5 (preset) | 500 | 0.06-0.07 | 0.02-0.03 | 24-29° ± 1.7-2.3° |
+| 4.0 / 2.0 | 470 | 0.02-0.03 | 0.01-0.02 | 19-26° ± 1.5-2.2° |
+
+The preset's weights halve the steering motion and quarter the throttle motion at about the same
+score; four times more over-smooths (the slide falls short of the command). Through the BeamNG
+driver against its stand-in with all the full-size-car differences on (see DEPLOY.md), the preset's
+policy held 27.0 ± 0.35° (steer change 0.045 per step) where the unsmoothed one held 27.9 ± 0.94°
+(0.18 per step).
 
 ## PPO trainer
 

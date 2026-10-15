@@ -185,7 +185,8 @@ META: dict[str, tuple[str, str, str]] = {
     "surface.looseness": ("-", "0 paved ... 1 deep sand", _B),
     "surface.loose_drag": ("-", "plowing drag when sliding sideways through loose material", _B),
 }
-# settings that exist in the dataclasses but have no effect on the simulation yet
+# settings that exist in the dataclasses but have no effect here (roughness and mu patches act only
+# through a sim.surface_map.SurfaceMap, which batch specs do not use yet)
 HIDDEN = {"vehicle.body_width", "surface.roughness", "surface.mu_patch_std"}
 
 UNIT_OK = re.compile(r"^[A-Za-z0-9^/*. \-]{1,16}$")

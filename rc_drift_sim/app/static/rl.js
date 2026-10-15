@@ -445,16 +445,24 @@
     ["beta", "Sideslip command", "number", "deg, within the trained range", "80px"],
     ["speed", "Speed command", "number", "m/s of the RC car (scaled up for BeamNG)", "80px"],
     ["scale", "Scale", "text", "auto: BeamNG car length / RC car length; 1 for an RC-size mod", "80px"],
-    ["steer_lock_deg", "Steering lock", "number", "road-wheel angle (deg) at full BeamNG steering; empty = as trained", "80px"],
-    ["throttle_gain", "Throttle gain", "number", "BeamNG throttle per unit policy throttle (an engine is not an RC motor)", "80px"],
+    ["throttle_mode", "Throttle", ["motor", "direct"], "motor: BeamNG's engine emulates the RC motor (the throttle sets the rear-wheel speed, as on the RC car); direct: raw throttle", "120px"],
+    ["gear", "Gear", "text", "fixed gear (default 2 with the motor emulation); auto = BeamNG's gearbox shifts (cuts the drive mid-slide)", "80px"],
+    ["assists", "Driving assists", ["off", "keep"], "off: switch ESC / traction control off (they fight a drift)", "120px"],
+    ["wheel_key", "Wheel speed", "text", "auto: the rear wheels, read from the vehicle; or an Electrics value such as wheelspeed", "120px"],
+    ["steer_lock_deg", "Steering lock", "number", "RC-equivalent road-wheel angle (deg) at full BeamNG steering; empty = measured at the start", "80px"],
+    ["throttle_gain", "Throttle gain", "number", "direct throttle only: BeamNG throttle per unit policy throttle", "80px"],
   ];
   function buildBeamng() {
     let saved = store.get(BNG_KEY) || {};
-    const defaults = { vehicle: "etk800", level: "smallgrid", seconds: 20, scale: "auto", throttle_gain: 1 };
+    const defaults = { vehicle: "etk800", level: "smallgrid", seconds: 20, scale: "auto", throttle_gain: 1, throttle_mode: "motor",
+      gear: "", assists: "off", wheel_key: "auto" };
     const inputs = {};
     const rows = BNG_FIELDS.map(([k, label, type, desc, width]) => {
-      const i = h("input", { type, value: saved[k] ?? (k === "home" ? (R.beamng && R.beamng.home) || "" : defaults[k] ?? ""), style: `width:${width}`, "aria-label": label });
-      i.addEventListener("input", () => { saved = { ...saved, [k]: i.value }; store.set(BNG_KEY, saved); });
+      const value = saved[k] ?? (k === "home" ? (R.beamng && R.beamng.home) || "" : defaults[k] ?? "");
+      const i = Array.isArray(type)
+        ? h("select", { style: `width:${width}`, "aria-label": label }, type.map((c) => h("option", { value: c, selected: c === value }, c)))
+        : h("input", { type, value, style: `width:${width}`, "aria-label": label });
+      i.addEventListener(Array.isArray(type) ? "change" : "input", () => { saved = { ...saved, [k]: i.value }; store.set(BNG_KEY, saved); });
       inputs[k] = i;
       return [h("label", { title: desc }, label), h("div", { class: "ctl" }, i, h("span", { class: "muted small rl-desc" }, desc))];
     });
@@ -474,7 +482,8 @@
     const i = R.dashEls.bng.inputs, num = (k) => (i[k].value === "" ? null : Number(i[k].value));
     return { home: i.home.value.trim(), vehicle: i.vehicle.value.trim(), part_config: i.part_config.value.trim(), level: i.level.value.trim(),
       seconds: num("seconds"), beta: num("beta"), speed: num("speed"), scale: i.scale.value.trim() === "auto" ? "auto" : num("scale"),
-      steer_lock_deg: num("steer_lock_deg"), throttle_gain: num("throttle_gain") };
+      steer_lock_deg: num("steer_lock_deg"), throttle_gain: num("throttle_gain"), throttle_mode: i.throttle_mode.value,
+      assists: i.assists.value, wheel_key: i.wheel_key.value.trim() || "auto", gear: i.gear.value.trim() };
   }
   async function startBeamng() {
     try { await api("POST", `/api/rl/runs/${encodeURIComponent(R.view)}/beamng`, bngBody()); toast("Starting BeamNG…", "ok"); pollView(); }
@@ -500,7 +509,11 @@
             `t ${L.t} s · RC-equivalent speed ${L.true_speed ?? "–"} m/s (BeamNG ${L.true_speed_beamng ?? "–"} m/s) · sideslip ${L.true_beta_deg ?? "–"}° · cmd ${L.steer} / ${L.throttle} · grip est ${L.grip_est ?? "–"} · safety ${L.override}`) : null)),
       b.messages && b.messages.length ? h("pre", { class: "small mono", style: "white-space:pre-wrap;max-height:160px;overflow:auto" }, b.messages.join("\n")) : null,
       sm ? h("div", { class: "small" }, h("b", {}, "Result: "),
-        `${sm.seconds} s (RC time), mean |sideslip| ${sm.mean_abs_beta_deg_2nd_half}° in the second half (command ${sm.target_beta_deg}°), speed ${sm.mean_speed_2nd_half} m/s (command ${sm.target_speed}), safety filter acted on ${(100 * sm.override_share).toFixed(1)} % of steps${sm.ended_early ? ", ended early" : ""}. Log: `, h("span", { class: "mono" }, b.log)) : null);
+        `${sm.seconds} s (RC time), mean |sideslip| ${sm.mean_abs_beta_deg_2nd_half}° ± ${sm.beta_std_deg_2nd_half ?? "–"}° in the second half (command ${sm.target_beta_deg}°), speed ${sm.mean_speed_2nd_half} ± ${sm.speed_std_2nd_half ?? "–"} m/s (command ${sm.target_speed}), safety filter acted on ${(100 * sm.override_share).toFixed(1)} % of steps${sm.ended_early ? ", ended early" : ""}`,
+        sm.smoothness ? `; steering moves ${sm.smoothness.steer_step} per step and reverses ${sm.smoothness.steer_reversals_per_s} times/s` : "",
+        ". Log: ", h("span", { class: "mono" }, b.log),
+        sm.car ? h("div", { class: "mono", style: "margin-top:4px" }, Object.entries(sm.car).map(([k, v]) => `${k} ${v}`).join(" · ")) : null,
+        sm.advice && sm.advice.length ? h("ul", { style: "margin:4px 0 0 18px" }, sm.advice.map((a) => h("li", { class: "warn" }, a))) : null) : null);
   }
   function evalTable(ev) {
     const pct = (v) => (v == null ? "–" : `${(100 * v).toFixed(1)} %`);

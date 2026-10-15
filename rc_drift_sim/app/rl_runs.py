@@ -142,7 +142,7 @@ class BeamNGJob:
     """One test drive of a run's exported model in BeamNG (deploy.beamng), in a background thread."""
 
     FIELDS = ("home", "vehicle", "part_config", "level", "seconds", "beta", "speed", "scale", "steer_lock_deg",
-              "throttle_gain", "gear", "launch", "port")
+              "throttle_gain", "gear", "launch", "port", "throttle_mode", "assists", "wheel_key", "calibrate")
 
     def __init__(self, folder: str, model_dir: Path, opts: dict):
         self.folder, self.model_dir, self.opts = folder, model_dir, opts
@@ -172,7 +172,9 @@ class BeamNGJob:
                             level=o.get("level") or "smallgrid", model=o.get("vehicle") or "etk800",
                             part_config=o.get("part_config") or None, scale=o.get("scale") or "auto",
                             steer_lock_deg=o.get("steer_lock_deg") or None, throttle_gain=float(o.get("throttle_gain") or 1.0),
-                            launch=o.get("launch", True) is not False, gear=o.get("gear") or None)
+                            launch=o.get("launch", True) is not False, gear=o.get("gear") or None,
+                            throttle_mode=o.get("throttle_mode") or "motor", assists=o.get("assists") or "off",
+                            wheel_key=o.get("wheel_key") or "auto", calibrate=o.get("calibrate", True) is not False)
             car.log = self.messages.append
             self.messages.append(rt.describe())
             self.status = "driving"
