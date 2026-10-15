@@ -146,8 +146,8 @@ class SurfaceParams:
     rolling_resistance: Any = 0.015   # Crr
     looseness: Any = 0.0              # 0 paved ... 1 deep sand; scales loose_affinity and plowing
     loose_drag: Any = 0.0             # plowing drag coefficient (fraction of Fz per plow_v_ref of lateral slide)
-    roughness: Any = 0.0              # normal-load noise amplitude, fraction of Fz (Milestone 2)
-    mu_patch_std: Any = 0.0           # per-patch random mu variation, std as fraction (Milestone 2)
+    roughness: Any = 0.0              # bump amplitude on Fz, fraction (acts on a surface_map only)
+    mu_patch_std: Any = 0.0           # random friction-patch std, fraction (acts on a surface_map only)
     optical_texture: Any = 1.0        # 0..1, optical flow reliability (Milestone 6)
     wet: Any = 0.0                    # 0/1 flag for sensor dropouts (Milestone 6)
     color: Any = "#888888"            # drawing only
