@@ -1,7 +1,8 @@
 # Reinforcement learning
 
 `rc_drift_sim.rl` turns the simulator into reinforcement-learning environments (Milestone 4) and
-includes a compact PPO trainer as the starting point for Milestone 5.
+includes a compact PPO trainer. With its default settings PPO learns to drift from the car's sensors
+and beats the reference controllers on both tasks (Milestone 5, [results](#results-milestone-5)).
 
 ```python
 import gymnasium as gym
@@ -57,13 +58,14 @@ Reference scores (8 s episodes, 32 cars, `rl.evaluate`):
 
 | policy | hold | track |
 |---|---|---|
+| **PPO, default settings, sensor observations** (Milestone 5) | **532** | **733** |
 | model-based drift controller (`LQRDriftBaseline`, reads the true state) | 480 | - |
 | circle-following grip driving (feed-forward steer + feedback) | - | 548 |
 | open-loop drift schedule of the test suite | 130 | 63 (leaves the circle) |
 | no input | 0 | 0 |
 | uniform random | -15 | -5 |
 
-A learned policy that drifts round the circle can reach about 800 on `track`.
+The maximum is 600 on `hold` (1.5 per step) and 800 on `track` (2.0 per step).
 
 ## Observations and actions
 
@@ -197,6 +199,54 @@ env = rl.DriftBatchEnv(32, cfg)
 print(rl.evaluate(env, lambda e: model.act(e.last_obs).numpy().astype(float)))
 ```
 
-Next (Milestone 5 onwards): tune the trainer and rewards until the policy drifts as well as the LQR
-baseline from sensor observations, then widen the randomization (Milestone 6) and export the
-policy for the car (Milestone 8).
+## Results (Milestone 5)
+
+The trainer with its default settings (sensor observations with noise, nominal car, parked start,
+no curriculum) learns both tasks. Runs on an Apple M4 GPU, 4,096 cars, 30-40 minutes each (with other jobs sharing the GPU):
+
+```bash
+driftsim-train --task hold  --envs 4096 --steps 20e6 --device mps --out runs/hold
+driftsim-train --task track --envs 4096 --steps 30e6 --device mps --out runs/track
+python scripts/make_rl_figures.py --hold runs/hold --track runs/track     # scores + docs/images/m5
+```
+
+Reference evaluation (as in the table above: nominal car, 32 cars, parked start, 8 s, default
+reward weights, deterministic policy; second half of the episode):
+
+| policy | return | spins | \|sideslip\| | speed | steps within 10° of 30° |
+|---|---|---|---|---|---|
+| PPO hold, seed 0 (sensors) | 532 | 0 % | 28.6° | 1.56 m/s | 100 % |
+| PPO hold, seed 1 (sensors) | 533 | 0 % | 28.6° | 1.56 m/s | 100 % |
+| LQR drift controller (true state) | 481 | 0 % | 30.4° | 1.49 m/s | 100 % |
+| PPO track (sensors) | 733 | 0 % | 32.8° | 1.54 m/s | 100 % |
+
+<p align="center">
+  <img src="images/m5/learning_curves.png" width="820" alt="PPO learning curves on both tasks"><br>
+  <em>Training return. The hold policy passes the LQR controller after about 6M steps; both curves
+  have flattened by 12M.</em>
+</p>
+
+<p align="center">
+  <img src="images/m5/hold_snapshot.png" width="400" alt="Learned drift, top view">
+  <img src="images/m5/track_snapshot.png" width="400" alt="Learned circle drift, top view"><br>
+  <img src="images/m5/hold_timeseries.png" width="600" alt="Learned drift vs LQR over time"><br>
+  <em>Top: the learned donut and the learned drift round the 1.5 m circle. Bottom: the policy flicks
+  the car into the drift in under a second (the LQR's scripted launch and throttle stab take three)
+  and then holds about 29° at 1.56 m/s. It picked the mirror-image, right-hand drift, so its
+  counter-steer has the opposite sign to the LQR's. Most of its lead over the LQR comes from the
+  faster entry.</em>
+</p>
+
+What the policies do not do yet:
+
+* **Generalize over grip.** They are trained on one nominal car. On `rl.evaluation`'s grip sweep the
+  hold policy scores 507 at 0.75x the P-tile grip, 469 at 1.0x and 355 at 1.25x, and spins in every
+  episode at 0.5x. Domain randomization (Milestone 6, and the safe-adaptive preset above) is the fix.
+  In the cancelled `safe-adaptive` verification run, the 5M-step checkpoint already scores 492 on
+  this nominal test with the safety filter and grip randomization.
+* **Drive smoothly.** The steering chatters at about the control rate (bottom plot); the
+  action-rate penalty in the reward is small. The `smooth_temporal` / `smooth_spatial` settings
+  target this.
+
+Next: widen the randomization until the grip sweep is flat (Milestone 6), mixed-surface tasks on
+`sim.surface_map` maps (Milestone 7), then export the policy for the car (Milestone 8).

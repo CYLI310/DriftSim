@@ -49,7 +49,7 @@ policy that drifts on many surfaces and tire conditions and then runs on a real 
 | 2. Surface maps, friction patches, roughness and slopes | **done** ([docs/DESIGN.md](docs/DESIGN.md#5b-surface-maps-simsurface_mappy-milestone-2)) |
 | 3. GPU acceleration (PyTorch on Apple MPS / NVIDIA CUDA) for data generation | **done** (RL env on GPU comes with M4) |
 | 4. Gymnasium environment and drift rewards | **done** ([docs/RL.md](docs/RL.md)) |
-| 5. PPO training, first learned drift | next (a working PPO trainer is included) |
+| 5. PPO training, first learned drift | **done**: beats the LQR drift controller from sensors ([results](docs/RL.md#results-milestone-5)) |
 | 6. Domain randomization, realistic sensors, curriculum | planned (per-car batching is in place) |
 | 7. Mixed-surface tasks and evaluation suite | planned |
 | 8. System identification from real-car logs, ONNX export | planned |
@@ -176,10 +176,22 @@ envs = rl.DriftVectorEnv(1024, rl.EnvConfig(task="track", randomize={...}))   # 
 ```
 
 ```bash
-driftsim-train --task hold --envs 1024 --steps 20000000 --out runs/hold        # PPO
+driftsim-train --task hold --envs 4096 --steps 20e6 --device mps --out runs/hold    # PPO, ~30 min on an M4
 ```
 
-Tasks, observations, rewards, randomization and reference scores: [docs/RL.md](docs/RL.md).
+With the default settings PPO learns to drift from the car's sensors alone. On the reference test it
+scores 532 on `hold` (the model-based LQR drift controller, which reads the true state, scores 480)
+and 733 of 800 on the circle task, with no spins:
+
+<p align="center">
+  <img src="docs/images/m5/learning_curves.png" width="760" alt="PPO learning curves"><br>
+  <img src="docs/images/m5/hold_snapshot.png" width="360" alt="Learned drift">
+  <img src="docs/images/m5/track_snapshot.png" width="360" alt="Learned circle drift"><br>
+  <em>Milestone 5: training curves, the learned donut and the learned drift round a 1.5 m circle.</em>
+</p>
+
+Tasks, observations, rewards, randomization, reference scores and the Milestone 5 results:
+[docs/RL.md](docs/RL.md).
 
 **The final model: safe, self-adapting sliding on unknown low-friction surfaces.** One preset trains
 it (GUI: RL training → Presets, or the command below): a safety filter shared by training and the car,
@@ -265,7 +277,8 @@ DriftSim/
 ├── examples/              quickstart.py, surface_map.py, batch_export.py, specs/*.json datasets
 ├── scripts/               driftsim-gui.sh (start / stop the GUI), mac/ (DriftSim.app launcher),
 │                          windows/ (DriftSim.exe build, Start DriftSim.bat), bench_devices.py,
-│                          make_figures.py, tune_drift.py, make_param_reference.py, jetson/ (setup)
+│                          make_figures.py, make_rl_figures.py, tune_drift.py, make_param_reference.py,
+│                          jetson/ (setup)
 ├── tests/                 pytest suite
 └── docs/
     ├── DATA_GENERATION.md how to make datasets

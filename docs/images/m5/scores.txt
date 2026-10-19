@@ -1,0 +1,12 @@
+RC drift sim - Milestone 5: reference evaluation (32 cars, parked start, 8 s, nominal car)
+
+[hold] hold_default: obs sensors, history 1, 20M env steps
+PPO policy (sensors, deterministic)             532   early end   0 %   2nd half |beta| 28.6 deg, speed 1.56 m/s, within 10 deg of target 100 %
+LQR drift controller (true state)               481   early end   0 %   2nd half |beta| 30.4 deg, speed 1.49 m/s, within 10 deg of target 100 %
+no input                                          0   early end   0 %   2nd half |beta|  0.0 deg, speed 0.00 m/s, within 10 deg of target   0 %
+uniform random                                  -15   early end  97 %   2nd half |beta| 35.6 deg, speed 0.38 m/s, within 10 deg of target   1 %
+
+[track] track_default: obs sensors, history 1, 30M env steps
+PPO policy (sensors, deterministic)             733   early end   0 %   2nd half |beta| 32.8 deg, speed 1.54 m/s, within 10 deg of target 100 %
+no input                                          0   early end   0 %   2nd half |beta|  0.0 deg, speed 0.00 m/s, within 10 deg of target   0 %
+uniform random                                   -6   early end 100 %   2nd half |beta| 32.4 deg, speed 0.38 m/s, within 10 deg of target   1 %
